@@ -8,9 +8,11 @@ requires-python = ">=3.12,<3.13"
 # 依賴按里程碑逐步加入，不一次裝滿。
 # 每個套件進來時都要說得出是哪一步需要它（SPEC §10 Q2）。
 dependencies = [
-    "kaggle>=1.6.17", # M0 下載競賽資料
-    "polars>=1.0",    # M0 資料契約量測，pandas 讀 1.73 GB 會很慢
-    "pyyaml>=6.0",    # M0 讀 configs/ 的路徑設定
+    "kaggle>=1.6.17",   # M0 下載競賽資料
+    "polars>=1.0",      # M0 資料契約量測，pandas 讀 1.73 GB 會很慢
+    "pyyaml>=6.0",      # M0 讀 configs/ 的路徑設定
+    "matplotlib>=3.9",  # M0 EDA 圖表
+    "pyarrow>=17.0",    # M0 EDA 中間結果快取成 parquet
 ]
 
 [dependency-groups]
