@@ -15,6 +15,9 @@ models/
 .kaggle/
 kaggle.json
 
+# === 機器專屬設定：路徑因機器而異，只有 .example 範本進 Git ===
+configs/paths.yaml
+
 # === 個人資料，不對外 ===
 個人特質.txt
 
@@ -26,6 +29,8 @@ venv/
 .env
 *.egg-info/
 .ipynb_checkpoints/
+.pytest_cache/
+.ruff_cache/
 
 # === 實驗追蹤 ===
 mlruns/
