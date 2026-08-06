@@ -1,0 +1,39 @@
+# === 手冊附錄 A 規則一：資料絕對不可上傳到 GitHub ===
+data/
+models/
+*.csv
+*.tsv
+*.zip
+*.7z
+*.parquet
+*.feather
+*.h5
+*.pkl
+*.joblib
+
+# === 手冊附錄 A 規則二：Kaggle 憑證 ===
+.kaggle/
+kaggle.json
+
+# === 個人資料，不對外 ===
+個人特質.txt
+
+# === Python ===
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.egg-info/
+.ipynb_checkpoints/
+
+# === 實驗追蹤 ===
+mlruns/
+wandb/
+outputs/
+
+# === 編輯器與 OS ===
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
