@@ -1,0 +1,37 @@
+[project]
+name = "ml-kkbox"
+version = "0.1.0"
+description = "KKBox 訂閱流失預測與挽回決策系統"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+
+# 依賴按里程碑逐步加入，不一次裝滿。
+# 每個套件進來時都要說得出是哪一步需要它（SPEC §10 Q2）。
+dependencies = [
+    "kaggle>=1.6.17", # M0 下載競賽資料
+    "polars>=1.0",    # M0 資料契約量測，pandas 讀 1.73 GB 會很慢
+    "pyyaml>=6.0",    # M0 讀 configs/ 的路徑設定
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+# 這是應用程式而非可安裝的套件，不需要 build backend。
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# E/F 基本錯誤 · I import 排序 · UP 語法現代化 · B 常見 bug 樣式
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-ra"
