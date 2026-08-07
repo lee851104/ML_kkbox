@@ -48,4 +48,9 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# -ra 讓 skip 的測試連同原因一起列出來。紅線清單有 4 條還沒能實作，
+# 要讓它們每次都被看見，不能靜靜跳過。
 addopts = "-ra"
+markers = [
+    "slow: 需要掃大檔或建 cohort 的測試。用 -m 'not slow' 跳過",
+]

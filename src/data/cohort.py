@@ -111,6 +111,30 @@ def _last(col: str) -> pl.Expr:
     return pl.col(col).sort_by("transaction_date").last().alias(f"last_{col}")
 
 
+def assert_asof_respected(df: pl.DataFrame) -> None:
+    """紅線 1 守門：沒有任何用戶的最後一筆交易晚於自己的 cutoff。
+
+    抽成獨立函式而不是寫在 build_cohort 裡面，是為了讓它可以被單獨測試。
+    SPEC §5 要求每條紅線都要有「會失敗的測試」—— 測試必須能餵給它一張
+    確實違規的表，確認它真的會 raise。只驗證「正常資料會通過」證明不了
+    守門有效，因為一個永遠回傳 None 的空函式也會通過。
+
+    Raises:
+        AssertionError: 存在 last_tx > cutoff 的列。
+    """
+    missing = {"last_tx", "cutoff"} - set(df.columns)
+    if missing:
+        raise KeyError(f"缺少檢查所需的欄位：{sorted(missing)}")
+
+    violations = df.filter(pl.col("last_tx") > pl.col("cutoff"))
+    if violations.height:
+        worst = violations.select((pl.col("last_tx") - pl.col("cutoff")).max().alias("d")).item()
+        raise AssertionError(
+            f"紅線 1 違反：{violations.height:,} 位用戶的特徵含 cutoff 之後的交易"
+            f"（最嚴重的超出 cutoff 約 {worst} 天）。as-of 截斷失效，本表不可使用。"
+        )
+
+
 def build_cohort(
     spec: CohortSpec | str = FEB,
     paths: Paths | None = None,
@@ -161,9 +185,7 @@ def build_cohort(
     # 這個 filter 順帶擋掉了 SPEC §2.1 的兩個哨兵值：19700101（Unix epoch，
     # 等同 null）和 20361015（2036 年）都不在區間內，不會被選為 cutoff。
     cutoffs = (
-        tx.filter(
-            pl.col("membership_expire_date").is_between(spec.expire_start, spec.expire_end)
-        )
+        tx.filter(pl.col("membership_expire_date").is_between(spec.expire_start, spec.expire_end))
         .group_by("msno")
         .agg(pl.col("membership_expire_date").max().alias("cutoff"))
         .collect(engine="streaming")
@@ -210,12 +232,7 @@ def build_cohort(
 
     # ---- 步驟 4：紅線 1 守門檢查 ----
     # 永遠會跑，不是只在測試裡。洩漏一旦發生，寧可整支爆掉也不要靜靜產出錯的表。
-    violations = out.filter(pl.col("last_tx") > pl.col("cutoff")).height
-    if violations:
-        raise AssertionError(
-            f"紅線 1 違反：{violations:,} 位用戶的特徵含 cutoff 之後的交易。"
-            " as-of 截斷失效，本表不可使用。"
-        )
+    assert_asof_respected(out)
 
     out.write_parquet(cache)
     log(f"  完成 {out.height:,} 列 × {out.width} 欄，已快取 → {cache.name}")
