@@ -23,26 +23,20 @@ repo 結構，notebooks/ 只放 EDA。
 # 0. 設定
 # ============================================================================
 import math
-from pathlib import Path
 
 import matplotlib
 import matplotlib.pyplot as plt
 import polars as pl
-import yaml
 
-# 找 repo 根目錄。用 __file__ 往上找，這樣不管 PyCharm 的工作目錄設在哪都能跑。
-REPO = Path(__file__).resolve().parents[1]
+from src.config import REPO_ROOT, load_paths
+from src.data import FEB, build_cohort
 
-# 讀資料路徑。和 scripts/download.py 用同一份設定檔，所以換電腦不用改這裡。
-# （這段載入邏輯跟 download.py 重複了，之後會抽到 src/ 共用，現在先保持
-#   這支腳本可以獨立執行。）
-_cfg = yaml.safe_load((REPO / "configs" / "paths.yaml").read_text(encoding="utf-8"))
-RAW = Path(_cfg["data_root"]) / "raw"
-INTERIM = Path(_cfg["data_root"]) / "interim"
-FIGDIR = REPO / "reports" / "figures"
-
-INTERIM.mkdir(parents=True, exist_ok=True)
-FIGDIR.mkdir(parents=True, exist_ok=True)
+# 路徑從 src.config 拿。這支腳本原本自己讀了一次 paths.yaml，跟
+# scripts/download.py 的載入邏輯重複 —— 現在兩邊走同一份程式碼，
+# 換電腦時也只有 configs/paths.yaml 一個地方要改。
+PATHS = load_paths().ensure()
+RAW = PATHS.raw
+FIGDIR = PATHS.figures
 
 FORCE_REBUILD = False
 
@@ -70,7 +64,7 @@ def pct(x: float) -> str:
     return f"{x:.2%}"
 
 
-print(f"repo   {REPO}")
+print(f"repo   {REPO_ROOT}")
 print(f"raw    {RAW}")
 print(f"圖表   {FIGDIR}")
 
@@ -125,75 +119,15 @@ save(fig, "01_cohort_churn_rate")
 #
 # 為什麼：標籤定義是「到期後 30 天內有沒有新交易」。到期日之後的那筆交易
 # 就是答案本身。讓它進特徵，CV 分數會漂亮到不真實，上線後全崩。
+#
+# 實作已經抽到 src/data/cohort.py。原因不是「整理程式碼」，是 M1 要用
+# Feb cohort 訓練、Mar cohort 驗證 —— 同一段截斷邏輯要跑兩次。留在
+# notebook 裡就得複製貼上改日期，那正是紅線 1 最容易破功的地方。
+#
+# 那個模組還內建了守門檢查：算完會驗證沒有任何用戶的最後一筆交易晚於
+# 自己的 cutoff，違反就直接 raise。想看實作按住 Ctrl 點 build_cohort。
 
-
-def build_feb_cohort(cache: Path) -> pl.DataFrame:
-    """算出 Feb cohort 每人一列的 as-of 特徵。"""
-    if cache.exists() and not FORCE_REBUILD:
-        print(f"讀取快取 {cache.name}（要重算請把 FORCE_REBUILD 設成 True）")
-        return pl.read_parquet(cache)
-
-    print("開始計算（掃 2,154 萬列交易，請稍候）...")
-
-    # 兩個交易檔都要載入。SPEC §5.1：transactions_v2 有 74.76% 是 2017-03 的
-    # 交易，只用它等於完全沒有歷史特徵。
-    tx = pl.concat(
-        [
-            pl.scan_csv(RAW / "transactions.csv"),
-            pl.scan_csv(RAW / "transactions_v2.csv"),
-        ]
-    )
-
-    # 每個人的 cutoff = 落在 2017-02 的到期日
-    cutoffs = (
-        tx.filter(pl.col("membership_expire_date").is_between(20170201, 20170228))
-        .group_by("msno")
-        .agg(pl.col("membership_expire_date").max().alias("cutoff"))
-        .collect(engine="streaming")
-    )
-    cohort = train.join(cutoffs, on="msno", how="inner")
-    print(f"  對得上標籤的用戶 {cohort.height:,} 人")
-
-    # 只取 cutoff 之前的交易，聚合成每人一列。
-    # 「最後一筆」用 sort_by("transaction_date").last() 明確指定，不依賴
-    # group_by 的列順序 —— 那個順序不保證。
-    def last_of(col: str) -> pl.Expr:
-        return pl.col(col).sort_by("transaction_date").last().alias(f"last_{col}")
-
-    asof = (
-        tx.join(cohort.lazy(), on="msno", how="inner")
-        .filter(pl.col("transaction_date") <= pl.col("cutoff"))
-        .group_by("msno")
-        .agg(
-            pl.col("is_churn").first(),
-            pl.col("cutoff").first(),
-            pl.len().alias("n_tx"),
-            pl.col("transaction_date").min().alias("first_tx"),
-            pl.col("is_cancel").sum().alias("n_cancel_hist"),
-            pl.col("actual_amount_paid").mean().alias("mean_paid"),
-            last_of("is_cancel"),
-            last_of("is_auto_renew"),
-            last_of("actual_amount_paid"),
-            last_of("plan_list_price"),
-            last_of("payment_plan_days"),
-            last_of("payment_method_id"),
-        )
-    )
-
-    # 左外接 members_v3。用 left join 而不是 inner join，因為要保留
-    # 「查不到用戶屬性」的人 —— 實測有 11.66% 查不到，而且那本身是訊號。
-    out = (
-        asof.join(pl.scan_csv(RAW / "members_v3.csv"), on="msno", how="left")
-        .with_columns(pl.col("city").is_not_null().alias("in_members"))
-        .collect(engine="streaming")
-    )
-
-    out.write_parquet(cache)
-    print(f"  已快取 → {cache}")
-    return out
-
-
-df = build_feb_cohort(INTERIM / "feb_cohort_asof.parquet")
+df = build_cohort(FEB, PATHS, force=FORCE_REBUILD)
 print(f"\nas-of 特徵表 {df.height:,} 列 × {df.width} 欄")
 print(df.columns)
 

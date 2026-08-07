@@ -21,9 +21,21 @@ dev = [
     "ruff>=0.6",
 ]
 
-# 這是應用程式而非可安裝的套件，不需要 build backend。
-[tool.uv]
-package = false
+# 把專案裝成可匯入的套件（editable 模式）。
+#
+# 為什麼需要：src/ 底下的模組要能被 scripts/、notebooks/、tests/ 匯入。
+# 如果不裝，`from src.config import ...` 只有在「工作目錄剛好是 repo 根目錄」
+# 時才成功 —— PyCharm 執行 notebooks/ 裡的檔案時工作目錄可能是 notebooks/，
+# 就會 ImportError。裝成套件之後，venv 裡的任何程式在任何目錄都匯得到。
+#
+# editable 的意思是「安裝的是捷徑不是副本」：改 src/ 的程式碼立刻生效，
+# 不用重新 uv sync。
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
 
 [tool.ruff]
 line-length = 100

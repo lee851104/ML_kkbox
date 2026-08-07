@@ -24,10 +24,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-import yaml
+from src.config import load_paths
 
 COMPETITION = "kkbox-churn-prediction-challenge"
-REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # 官方檔案清單。壓縮大小為 2026-08-06 以 `kaggle competitions files` 實測。
 # 大小用來驗證下載完整性：這是靜態的歷史資料集，數字變了就代表下載被截斷或
@@ -60,22 +59,6 @@ def human(n: float) -> str:
             return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
         n /= 1024
     return f"{n:.2f} GB"
-
-
-def load_config() -> dict:
-    """讀 configs/paths.yaml。環境變數 DATA_ROOT 優先，方便 CI 覆寫。"""
-    cfg_path = REPO_ROOT / "configs" / "paths.yaml"
-    if not cfg_path.exists():
-        sys.exit(
-            "找不到 configs/paths.yaml。請先執行：\n"
-            "    copy configs\\paths.example.yaml configs\\paths.yaml\n"
-            "然後把裡面的 data_root 改成這台機器的實際路徑。"
-        )
-    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
-    cfg["data_root"] = os.environ.get("DATA_ROOT") or cfg.get("data_root", "")
-    if not cfg["data_root"]:
-        sys.exit("configs/paths.yaml 缺少 data_root 設定。")
-    return cfg
 
 
 def find_7z(configured: str) -> Path | None:
@@ -183,10 +166,12 @@ def main() -> int:
     ap.add_argument("--no-extract", action="store_true", help="只下載 .7z，不解壓")
     args = ap.parse_args()
 
-    cfg = load_config()
-    data_root = Path(cfg["data_root"])
-    archives = data_root / "archives"
-    raw = data_root / "raw"
+    # 路徑設定統一由 src.config 提供，不在這裡自己讀 YAML。
+    try:
+        paths = load_paths()
+    except FileNotFoundError as e:
+        sys.exit(str(e))
+    archives, raw = paths.archives, paths.raw
     archives.mkdir(parents=True, exist_ok=True)
     raw.mkdir(parents=True, exist_ok=True)
 
@@ -197,14 +182,14 @@ def main() -> int:
         key=lambda n: FILES[n][1],
     )
 
-    print(f"資料根目錄  {data_root}")
+    print(f"資料根目錄  {paths.data_root}")
     print(f"群組        {', '.join(sorted(groups))}")
     print(f"檔案        {len(targets)} 個，壓縮合計 {human(sum(FILES[n][1] for n in targets))}")
     print()
 
     sevenzip = None
     if not args.no_extract:
-        sevenzip = find_7z(cfg.get("sevenzip") or "")
+        sevenzip = find_7z(paths.sevenzip)
         if sevenzip is None:
             sys.exit("找不到 7-Zip。請安裝後在 configs/paths.yaml 指定，或加 --no-extract。")
 
