@@ -18,6 +18,18 @@ from src.data import FEB, MAR, CohortSpec, build_cohort
 # 只跑快的那些。
 SLOW = pytest.mark.slow
 
+# 完全不碰原始資料的測試 —— 純邏輯與靜態檢查。
+#
+# CI 跑在 GitHub Actions 上，那裡沒有資料（資料不進 Git），所以 43 條測試裡
+# 有 36 條會 skip。問題是：**一個全部 skip 的測試套件也會顯示綠燈**。
+# 因此把不需資料的那些標成 nodata，CI 單獨跑一次
+#     uv run pytest -m nodata
+# 並要求「全過且零 skip」。這樣 CI 的綠燈才對應到「真的驗證了東西」。
+#
+# 判準：這個測試有沒有用到 paths / raw_files / feb_cohort / mar_cohort 任一
+# fixture。有就不能標 nodata。
+NODATA = pytest.mark.nodata
+
 
 @pytest.fixture(scope="session")
 def paths() -> Paths:

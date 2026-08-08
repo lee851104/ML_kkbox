@@ -23,7 +23,7 @@ import pytest
 from src.config import REPO_ROOT
 from src.data import assert_asof_respected
 from src.evaluation import EPS, constant_log_loss, log_loss
-from tests.conftest import SLOW
+from tests.conftest import NODATA, SLOW
 
 # 測試觀察期的上界。SPEC 紅線 7：不得使用 2017-04 之後的任何資料。
 MAX_ALLOWED_DATE = 20170430
@@ -35,6 +35,7 @@ MAX_ALLOWED_DATE = 20170430
 # 「到期日之後的交易就是標籤」—— 這是本題的頭號洩漏。
 
 
+@NODATA
 def test_red_line_1_guard_catches_violation():
     """守門函式必須能擋下違規的表。
 
@@ -53,6 +54,7 @@ def test_red_line_1_guard_catches_violation():
         assert_asof_respected(bad)
 
 
+@NODATA
 def test_red_line_1_guard_accepts_clean_table():
     """乾淨的表要能通過，否則守門太嚴會擋掉正常流程。
 
@@ -69,6 +71,7 @@ def test_red_line_1_guard_accepts_clean_table():
     assert_asof_respected(good)  # 不應 raise
 
 
+@NODATA
 def test_red_line_1_guard_rejects_missing_columns():
     """欄位缺失要明確報錯，不能默默視為通過。"""
     with pytest.raises(KeyError):
@@ -90,6 +93,7 @@ def test_red_line_1_real_cohorts_are_clean(request, fixture_name: str):
 # 官方在 2017-11-13 發布 v3 就是為了移除它。
 
 
+@NODATA
 def test_red_line_3_no_code_reads_members_csv():
     """程式碼裡不得出現對 members.csv 的引用。
 
@@ -159,6 +163,7 @@ def test_red_line_7_cutoff_inside_cohort_window(feb_cohort, mar_cohort):
 # ===========================================================================
 
 
+@NODATA
 def test_red_line_8_clip_prevents_infinity():
     """極端預測必須產生有限值。
 
@@ -191,6 +196,7 @@ def test_red_line_8_clip_prevents_infinity():
     assert abs(loss_high - loss_low) < 1e-3
 
 
+@NODATA
 def test_red_line_8_matches_hand_computation():
     """與手算的公式對照，確認實作沒寫錯。
 
@@ -204,6 +210,7 @@ def test_red_line_8_matches_hand_computation():
     assert log_loss(y, p) == pytest.approx(expected, rel=1e-12)
 
 
+@NODATA
 def test_red_line_8_rejects_bad_input():
     """長度不符或空輸入要明確報錯，不能靜靜回傳一個數字。"""
     with pytest.raises(ValueError):

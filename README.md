@@ -9,10 +9,11 @@
 
 ---
 
-> ### 🚧 專案狀態：M0 收尾中（骨架、資料契約、防洩漏測試已完成；Makefile 與 CI 未建）
+> ### 🚧 專案狀態：M0 完成，M1 未開始
 >
 > 已完成：全部 10 個競賽檔案下載並實測、`src/` 基礎模組、EDA 與 8 張圖表、
-> `tests/` 資料契約 12 條斷言與 4 條紅線測試（**39 passed · 4 skipped**）。
+> `tests/` 資料契約 12 條斷言與 4 條紅線測試（**39 passed · 4 skipped**）、
+> Makefile、GitHub Actions CI。
 >
 > 基準線為實測值。**M1 以後的模型分數尚未產生，表中為佔位符。**
 > 在本橫幅移除之前，請勿將本 repo 的模型數字視為成果。
@@ -162,8 +163,10 @@ flowchart LR
 ## 快速開始
 
 > ⚠️ 依 Kaggle 競賽規則，原始資料**不隨 repo 散布**。請依下列步驟自行下載。
->
-> 以下為目前可實際執行的指令。`Makefile` 尚未建立（M0 未完項目），完成後這些會有對應的 `make` 捷徑。
+
+各步驟都有 `make` 捷徑，但 **Windows 沒有內建 `make`**。下方同時列出 `make` 與底層的 `uv` 指令，**兩者效果完全相同**，沒裝 make 就直接用 uv 那行。
+
+Windows 若要裝 make：`winget install ezwinports.make`。列出所有目標用 `make help`。
 
 ### 1. 安裝 uv 並建立環境
 
@@ -172,10 +175,10 @@ pip install uv
 ```
 
 ```bash
-uv sync
+make setup
 ```
 
-`uv sync` 會自行取得 Python 3.12（不影響系統 Python）、建立 `.venv`、並以 editable 模式安裝本專案，`from src.config import ...` 因而在任何工作目錄都可用。
+沒有 make 就用 `uv sync`。這一步會自行取得 Python 3.12（不影響系統 Python）、建立 `.venv`、並以 editable 模式安裝本專案，`from src.config import ...` 因而在任何工作目錄都可用。
 
 ### 2. 設定資料路徑
 
@@ -203,42 +206,40 @@ sevenzip: C:/Program Files/7-Zip/7z.exe    # 留空則自動搜尋
 先只抓 M0／M1 需要的檔案（約 1.02 GB）：
 
 ```bash
-uv run python scripts/download.py
+make data
 ```
 
 要全部 8.95 GB（含 M2 的 `user_logs`，解壓後共約 34 GB）：
 
 ```bash
-uv run python scripts/download.py --groups all
+make data-all
 ```
+
+沒有 make 就用 `uv run python scripts/download.py`，加 `--groups all` 抓全部。
 
 腳本內嵌官方檔案的 byte 數契約，下載被截斷會直接報錯；下載與解壓皆可重複執行，中斷後重跑會跳過已完成的檔案。**資料一律落在 `data_root` 之下，不會進入專案資料夾。**
 
 ### 5. 驗證資料正確
 
 ```bash
-uv run pytest -q
+make test
 ```
 
-應為 **39 passed · 4 skipped**（skip 的是四條依賴後續里程碑的紅線測試）。資料尚未下載時測試會 skip 而非 fail。
+應為 **39 passed · 4 skipped**，約 30 秒（skip 的是四條依賴後續里程碑的紅線測試）。資料尚未下載時測試會 skip 而非 fail —— 剛 clone 完 repo 的人不該看到滿螢幕紅字。
 
-只跑不需掃大檔的部分：
-
-```bash
-uv run pytest -m "not slow" -q
-```
+`make test-fast` 跳過需掃大檔的測試；`make lint` 跑 ruff 檢查。沒有 make 時對應 `uv run pytest`、`uv run pytest -m "not slow"`、`uv run ruff check .`。
 
 ### 6. 跑 EDA
 
 ```bash
-uv run python notebooks/eda_01_overview.py
+make eda
 ```
 
-圖表輸出至 `reports/figures/`。在 PyCharm 中可用 `# %%` 儲存格逐段執行（Ctrl+Enter）。第一次執行需掃描 2,298 萬列交易建立 as-of 特徵表，之後讀 parquet 快取。
+圖表輸出至 `reports/figures/`。在 PyCharm 中可用 `# %%` 儲存格逐段執行（Ctrl+Enter），這樣可以一段一段看結果。第一次執行需掃描 2,298 萬列交易建立 as-of 特徵表，之後讀 parquet 快取。
 
 ### 7. 後續流程
 
-`make features / train / eval` 對應的 M1–M4 尚未實作。
+`make features / train / eval / serve` 對應 M1–M6，尚未實作 —— 執行會明確報錯並說明屬於哪個里程碑，不會安靜地什麼都不做。
 
 ---
 
@@ -251,7 +252,7 @@ ML_kkbox/
 ├── ✅ README.md                  # 你正在讀的檔案
 ├── ✅ SPEC.md                    # 規格書：資料契約、驗證策略、紅線清單
 ├── ⬜ MODEL_CARD.md              # 模型用途、限制、已知偏誤 —— M6
-├── ⬜ Makefile                   # setup / data / test / features / train —— M0 未完
+├── ✅ Makefile                   # 常用指令索引，`make help` 列出全部
 ├── ✅ pyproject.toml             # uv 管理依賴，依里程碑逐步加入
 ├── ✅ .python-version            # 釘 Python 3.12
 ├── ✅ uv.lock                    # 精確版本，跨機器一致
@@ -275,10 +276,35 @@ ML_kkbox/
 ├── ✅ notebooks/
 │   └── ✅ eda_01_overview.py     # 僅 EDA，不放訓練邏輯
 ├── ✅ reports/figures/           # 8 張圖表
-└── ⬜ .github/workflows/ci.yml   # ruff + pytest —— M0 未完
+└── ✅ .github/workflows/ci.yml   # ruff + pytest（見下方 CI 的限制）
 ```
 
 `src/features/`、`src/models/`、`src/serving/` 刻意尚未建立。空的套件目錄是雜訊，等到有東西要放進去時再開。
+
+---
+
+## CI 驗證了什麼（以及沒驗證什麼）
+
+**CI runner 上沒有原始資料** —— 資料依競賽規則不進 Git。因此 43 條測試裡有 36 條在 CI 上會被跳過。
+
+⚠️ **一個全部 skip 的測試套件也會顯示綠燈。** 這跟本專案 [SPEC.md §4.5](SPEC.md) 講的「總分會騙人」是同一類問題：一個看起來成功的數字，底下什麼都沒驗證。
+
+因此 CI 把不需資料的純邏輯測試標記為 `nodata`，單獨跑一段並**要求全過且零 skip**：
+
+| CI 實際驗證 | 內容 |
+|---|---|
+| **紅線 1** | as-of 截斷守門函式 —— 包含餵入違規資料確認它會 raise |
+| **紅線 3** | 程式碼不得引用 `members.csv` 的靜態掃描 |
+| **紅線 8** | log loss 的官方 clip 行為、與手算公式對照、錯誤輸入處理 |
+| Lint | `ruff check` + 格式檢查，全 repo |
+
+| CI **無法**驗證 | 為什麼 |
+|---|---|
+| 資料契約 12 條斷言 | 需要 34 GB 原始資料 |
+| 紅線 7（無未來資料） | 需要建 cohort 特徵表 |
+| M1 基準線 0.30746 | 同上 |
+
+這些只能在有資料的機器上執行（`make test`）。**CI 綠燈不等於資料正確**，這個界線必須講清楚。
 
 ---
 

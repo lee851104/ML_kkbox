@@ -48,9 +48,12 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-# -ra 讓 skip 的測試連同原因一起列出來。紅線清單有 4 條還沒能實作，
-# 要讓它們每次都被看見，不能靜靜跳過。
-addopts = "-ra"
+# -ra          列出 skip 的測試與原因。紅線清單有 4 條還沒能實作，
+#              要讓它們每次都被看見，不能靜靜跳過。
+# --strict-markers  未註冊的 marker 直接報錯，避免打錯字變成靜默失效的標記
+#                   （@pytest.mark.nodta 不會擋下任何東西，卻長得像有用）。
+addopts = "-ra --strict-markers"
 markers = [
     "slow: 需要掃大檔或建 cohort 的測試。用 -m 'not slow' 跳過",
+    "nodata: 完全不碰原始資料的純邏輯測試。CI 用 -m nodata 跑，要求零 skip",
 ]

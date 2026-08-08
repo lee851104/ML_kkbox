@@ -544,10 +544,25 @@ E[淨收益] = p_churn × r_save × LTV_saved − C_offer
 | EDA `notebooks/eda_01_overview.py` + `reports/figures/` 8 張圖 | ✅ |
 | `tests/test_data_contract.py` —— §2.3 全 12 條斷言 | ✅ |
 | `tests/test_no_leakage.py` —— 紅線 1 / 3 / 7 / 8（另 4 條以 skip 保留，見 §5） | ✅ |
-| `Makefile` | ⬜ |
-| `.github/workflows/ci.yml` | ⬜ |
+| `Makefile` —— `make help` 列出全部目標 | ✅ |
+| `.github/workflows/ci.yml` —— ruff + pytest | ✅ |
 
-目前測試狀態：**39 passed · 4 skipped**（skip 的 4 條為紅線 2 / 4 / 5 / 6，依賴尚未存在的程式碼，見 §5）。
+**M0 完成。** 目前測試狀態：**39 passed · 4 skipped**（skip 的 4 條為紅線 2 / 4 / 5 / 6，依賴尚未存在的程式碼，見 §5）。
+
+#### CI 的驗證範圍限制
+
+CI runner 上**沒有原始資料**（依競賽規則不進 Git），43 條測試在該環境只有 7 條能執行。**一個全部 skip 的套件同樣會顯示綠燈**，這與 §4.5 指出的「只報總分會掩蓋失效」是同一類錯誤。
+
+因此不需資料的純邏輯測試被標記為 `nodata`，CI 單獨執行該子集並要求**全過且零 skip**：
+
+| CI 實際驗證 | 涵蓋 |
+|---|---|
+| 紅線 1 | `assert_asof_respected()`，含餵入違規資料確認會 raise |
+| 紅線 3 | 程式碼不得引用 `members.csv` 的靜態掃描 |
+| 紅線 8 | clip 行為、手算對照、錯誤輸入處理 |
+| Lint | `ruff check` + 格式檢查 |
+
+§2.3 的 12 條資料契約斷言、紅線 7、以及 M1 基準線 0.30746 都需要本機資料，**只能在下載過資料的機器上執行**（`make test`）。CI 綠燈不蘊含資料正確，這條界線必須在報告中講清楚。
 
 ---
 
