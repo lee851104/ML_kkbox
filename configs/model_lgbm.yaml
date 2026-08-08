@@ -1,0 +1,55 @@
+# M1 LightGBM baseline 超參數。
+#
+# SPEC §8：「設定管理 · Hydra / YAML in configs/ · 禁止硬編碼超參數」。
+# 程式碼裡不得出現任何數字常數，要調參數改這個檔案就好，
+# 而且每次實驗用了什麼設定可以直接從 git 歷史查。
+#
+# 這組是**未調參的合理起點**，不是最佳解。調參是 M3 的工作 ——
+# M1 的目的只是確認整條 pipeline 通、並取得一個誠實的基準分數。
+
+model:
+  objective: binary
+  metric: binary_logloss
+
+  # 學習率壓低配合較多輪數，讓 early stopping 有機會挑到好的停點。
+  learning_rate: 0.05
+
+  # 31 是 LightGBM 預設值。資料有 99 萬列，樹可以再深，
+  # 但 baseline 階段先不動 —— 免得分數好壞分不清是特徵還是調參的功勞。
+  num_leaves: 31
+
+  # 每個葉子至少 100 筆。流失率只有 6.39%，葉子太小會學到雜訊。
+  min_data_in_leaf: 100
+
+  # 特徵與樣本各抽 80%，降低過擬合。
+  feature_fraction: 0.8
+  bagging_fraction: 0.8
+  bagging_freq: 1
+
+  lambda_l2: 1.0
+
+  # 類別特徵的正則化。payment_method_id 有 33 種，不加約束容易過擬合。
+  cat_smooth: 10
+  min_data_per_group: 100
+
+  num_threads: 0    # 0 = 自動偵測核心數
+  verbosity: -1
+  seed: 42
+  deterministic: true
+
+training:
+  num_boost_round: 2000
+  early_stopping_rounds: 100
+  log_every_n: 100
+
+  # Early stopping 用的驗證集**從訓練 cohort 內部切出來**，不用 Mar cohort。
+  #
+  # 為什麼：如果用 Mar 做 early stopping，選停在哪一輪這個決定就看過 Mar 了，
+  # 回報的 Mar 分數會偏樂觀 —— 而 Mar 分數正是我們要拿來跟 0.30746 比較、
+  # 並外推到測試集的那個數字。留給它一個乾淨的身分。
+  #
+  # 在 Feb cohort 內部做隨機分層切分是安全的：契約測試已驗證 msno 在單一
+  # cohort 內不重複，且 as-of 截斷是逐用戶計算的，所以不存在時間洩漏。
+  # SPEC §4.2 也明文允許「在 Feb cohort 內部另做 StratifiedKFold」。
+  inner_valid_fraction: 0.2
+  inner_split_seed: 42

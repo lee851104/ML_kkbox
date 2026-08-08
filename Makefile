@@ -62,10 +62,15 @@ test-fast:
 test-ci:
 	uv run pytest -m nodata
 
-# --- 分析 ------------------------------------------------------------------
+# --- 分析與訓練 ------------------------------------------------------------
 
 eda:
 	uv run python notebooks/eda_01_overview.py
+
+# M1 baseline。訓練 Feb cohort、在 Mar cohort 評估，未達 SPEC §3.3 的
+# 0.30746 門檻會回傳非零離開碼。
+train:
+	uv run python scripts/train.py
 
 clean:
 	uv run python -c "import shutil, pathlib; [shutil.rmtree(p, ignore_errors=True) for p in list(pathlib.Path('.').rglob('__pycache__')) + [pathlib.Path('.pytest_cache'), pathlib.Path('.ruff_cache')]]; print('已清除 __pycache__ / .pytest_cache / .ruff_cache')"
@@ -76,11 +81,8 @@ clean:
 features:
 	@echo "make features 尚未實作 —— M2（user_logs 聚合特徵）" && exit 1
 
-train:
-	@echo "make train 尚未實作 —— M1（LightGBM baseline，目標 log loss < 0.30746）" && exit 1
-
 eval:
-	@echo "make eval 尚未實作 —— M1（依 SPEC §4.5 分三群回報）" && exit 1
+	@echo "make eval 尚未實作 —— M3（模型比較與特徵篩選）" && exit 1
 
 serve:
 	@echo "make serve 尚未實作 —— M6（FastAPI /predict）" && exit 1

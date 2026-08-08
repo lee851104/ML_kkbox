@@ -15,6 +15,7 @@ dependencies = [
     "pyarrow>=17.0",    # M0 EDA 中間結果快取成 parquet
     "lightgbm>=4.5",    # M1 baseline 模型（SPEC §8 主力）
     "scikit-learn>=1.5",# M1 StratifiedKFold 與後續 M4 校準
+    "numpy>=2.0",       # M1 LightGBM 的輸入格式，直接 import 所以明列
 ]
 
 [dependency-groups]
