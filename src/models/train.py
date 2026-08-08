@@ -40,7 +40,7 @@ import yaml
 from sklearn.model_selection import StratifiedKFold, train_test_split
 
 from src.config import REPO_ROOT, Paths, load_paths
-from src.data import FEB, MAR, build_cohort
+from src.data import FEB, MAR, CohortSpec, build_cohort
 from src.evaluation import constant_log_loss, log_loss, repeat_vs_new, segment_report
 from src.features import FeatureSet, build_features, build_log_features
 from src.models.candidates import to_lgb_arrays
@@ -112,18 +112,27 @@ def load_cohort_features(
     paths: Paths,
     cfg: dict[str, Any],
     *,
+    train_spec: CohortSpec = FEB,
+    valid_spec: CohortSpec = MAR,
     keep_features: list[str] | None = None,
     verbose: bool = True,
 ) -> tuple[FeatureSet, FeatureSet]:
-    """建好 Feb（訓練）與 Mar（驗證）兩份特徵矩陣。
+    """建好訓練與驗證兩份特徵矩陣。
 
     從 `train_baseline` 抽出來，讓 M3 的模型比較與特徵篩選共用同一段載入
     邏輯。三個套件如果各自載一次資料，「特徵集完全相同」這個前提就只是
     口頭承諾而不是程式保證。
 
+    預設是 SPEC §4.2 的 Feb → Mar。兩個 spec 開放參數化是為了 `scripts/
+    reverse_validation.py` 的反向驗證（Mar → Feb）—— **那不是第二個部署估計**，
+    是「換一組 train/valid，M3 的結論還成不成立」的穩健性探測。理由寫在
+    該腳本的模組註解裡。
+
     Raises:
-        ValueError: 兩個 cohort 的特徵欄位不一致。
+        ValueError: 兩個 cohort 的特徵欄位不一致，或 train/valid 是同一個月。
     """
+    if train_spec.name == valid_spec.name:
+        raise ValueError(f"訓練與驗證不能是同一個 cohort（都是 {train_spec.name}）")
 
     def log(msg: str = "") -> None:
         if verbose:
@@ -131,32 +140,38 @@ def load_cohort_features(
 
     use_logs = cfg.get("features", {}).get("use_logs", False)
     log(f"載入 cohort（收聽特徵：{'啟用' if use_logs else '停用'}）...")
-    feb_raw = build_cohort(FEB, paths, verbose=False)
-    mar_raw = build_cohort(MAR, paths, verbose=False)
+    train_raw = build_cohort(train_spec, paths, verbose=False)
+    valid_raw = build_cohort(valid_spec, paths, verbose=False)
 
-    feb_logs = mar_logs = None
+    train_logs = valid_logs = None
     if use_logs:
-        feb_logs = build_log_features(FEB, paths, verbose=False)
-        mar_logs = build_log_features(MAR, paths, verbose=False)
+        train_logs = build_log_features(train_spec, paths, verbose=False)
+        valid_logs = build_log_features(valid_spec, paths, verbose=False)
         log(
-            f"  收聽特徵覆蓋 Feb {feb_logs.height / feb_raw.height:.2%}"
-            f" · Mar {mar_logs.height / mar_raw.height:.2%}"
+            f"  收聽特徵覆蓋 {train_spec.name} {train_logs.height / train_raw.height:.2%}"
+            f" · {valid_spec.name} {valid_logs.height / valid_raw.height:.2%}"
         )
 
-    feb = build_features(feb_raw, feb_logs)
-    mar = build_features(mar_raw, mar_logs)
+    train = build_features(train_raw, train_logs)
+    valid = build_features(valid_raw, valid_logs)
 
     if keep_features is not None:
-        feb = feb.select(keep_features)
-        mar = mar.select(keep_features)
+        train = train.select(keep_features)
+        valid = valid.select(keep_features)
 
-    log(f"  訓練 Feb {feb.X.height:,} 列 × {feb.X.width} 特徵，流失率 {feb.y.mean():.4%}")
-    log(f"  驗證 Mar {mar.X.height:,} 列 × {mar.X.width} 特徵，流失率 {mar.y.mean():.4%}")
+    log(
+        f"  訓練 {train_spec.name} {train.X.height:,} 列 × {train.X.width} 特徵，"
+        f"流失率 {train.y.mean():.4%}"
+    )
+    log(
+        f"  驗證 {valid_spec.name} {valid.X.height:,} 列 × {valid.X.width} 特徵，"
+        f"流失率 {valid.y.mean():.4%}"
+    )
 
-    if feb.X.columns != mar.X.columns:
+    if train.X.columns != valid.X.columns:
         raise ValueError("兩個 cohort 的特徵欄位不一致，模型無法套用")
 
-    return feb, mar
+    return train, valid
 
 
 def train_baseline(

@@ -7,7 +7,7 @@
 #    效果完全相同 —— 本檔案只是那些指令的集中索引。安裝方式見 README。
 
 .DEFAULT_GOAL := help
-.PHONY: help setup data data-all lint format test test-fast test-ci eda features ablation train compare select encode tune mlflow clean eval serve
+.PHONY: help setup data data-all lint format test test-fast test-ci eda features ablation train compare select encode tune reverse mlflow clean eval serve
 
 help:
 	@echo "可用目標："
@@ -32,6 +32,7 @@ help:
 	@echo "  select     M3 null importance 特徵篩選 + 篩選前後對照（約 20 分鐘）"
 	@echo "  encode     M3 target encoding 對照（紅線 6，約 1 分鐘）"
 	@echo "  tune       M3 LightGBM 隨機搜尋 31 組（約 15 分鐘）"
+	@echo "  reverse    反向時間外驗證 Mar→Feb，檢查比較結論的穩健性（約 12 分鐘）"
 	@echo ""
 	@echo "  mlflow     開啟 MLflow UI 檢視實驗紀錄"
 	@echo "  clean      清除 __pycache__ / .pytest_cache / .ruff_cache"
@@ -108,6 +109,11 @@ encode:
 # 超參數隨機搜尋。搜尋全程只用 Feb cohort，Mar 只在最後看一次。
 tune:
 	uv run python scripts/tune.py
+
+# 反向時間外驗證。⚠️ Mar→Feb 是時間倒流，不是部署估計，只用於檢查
+# 「三方比較的排名」是不是單月雜訊。
+reverse:
+	uv run python scripts/reverse_validation.py
 
 mlflow:
 	uv run mlflow ui --backend-store-uri sqlite:///mlflow.db

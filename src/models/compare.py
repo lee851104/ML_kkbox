@@ -41,6 +41,7 @@ import yaml
 from sklearn.model_selection import train_test_split
 
 from src.config import REPO_ROOT, Paths
+from src.data import FEB, MAR, CohortSpec
 from src.evaluation import constant_log_loss, log_loss, repeat_vs_new, segment_report
 from src.features import FeatureSet
 from src.models.candidates import (
@@ -147,12 +148,15 @@ def run_comparison(
     paths: Paths,
     cfg: dict[str, Any],
     *,
+    train_spec: CohortSpec = FEB,
+    valid_spec: CohortSpec = MAR,
     only: list[str] | None = None,
     verbose: bool = True,
 ) -> tuple[list[CandidateResult], FeatureSet, FeatureSet]:
     """三家各訓練一次，回傳結果清單與兩份特徵矩陣（供後續報表使用）。
 
     Args:
+        train_spec / valid_spec: 訓練與驗證的 cohort。預設 Feb → Mar。
         only: 只跑這幾個候選（除錯用）。None 代表全跑。
     """
 
@@ -160,9 +164,11 @@ def run_comparison(
         if verbose:
             print(msg, flush=True)
 
-    feb, mar = load_cohort_features(paths, cfg, verbose=verbose)
+    feb, mar = load_cohort_features(
+        paths, cfg, train_spec=train_spec, valid_spec=valid_spec, verbose=verbose
+    )
     train, es = split_for_early_stopping(feb, cfg["training"])
-    log(f"  Feb 內部切分：訓練 {train.X.height:,} · early stopping {es.X.height:,}")
+    log(f"  {train_spec.name} 內部切分：訓練 {train.X.height:,} · early stopping {es.X.height:,}")
 
     # XGBoost 的類別字典**只用訓練 cohort 擬合**（紅線 5：encoding 狀態必須
     # 在訓練資料內計算）。Mar 若出現 Feb 沒有的取值，推論時落到缺失分支 ——
@@ -189,7 +195,10 @@ def run_comparison(
         secs = time.perf_counter() - t0
         r = evaluate(fitted, key, mar, feb, secs)
         results.append(r)
-        log(f"      → Mar log loss {r.logloss:.5f}　停在第 {r.best_iteration} 輪　({secs:.0f} 秒)")
+        log(
+            f"      → {valid_spec.name} log loss {r.logloss:.5f}"
+            f"　停在第 {r.best_iteration} 輪　({secs:.0f} 秒)"
+        )
 
     return results, feb, mar
 
