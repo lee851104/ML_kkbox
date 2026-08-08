@@ -8,6 +8,12 @@ from src.features.build import (
     FeatureSet,
     build_features,
 )
+from src.features.encoding import (
+    TargetEncoder,
+    assert_encoding_is_oof,
+    fit_target_encoder,
+    oof_target_encode,
+)
 from src.features.logs import (
     LOG_GROUPS,
     LOG_WINDOWS,
@@ -23,10 +29,14 @@ __all__ = [
     "LOG_GROUPS",
     "LOG_WINDOWS",
     "FeatureSet",
+    "TargetEncoder",
+    "assert_encoding_is_oof",
     "assert_logs_within_cutoff",
     "build_features",
     "build_log_features",
+    "fit_target_encoder",
     "log_feature_group",
     "narrow_logs",
+    "oof_target_encode",
     "window_bounds",
 ]

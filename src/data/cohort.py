@@ -168,6 +168,15 @@ def build_cohort(
     if cache.exists() and not force:
         cached = pl.read_parquet(cache)
         if EXPECTED_COLUMNS <= set(cached.columns):
+            # ⚠️ **快取命中也要跑守門。**
+            #
+            # 快取是一個 parquet 檔，不是一個保證。它可能是舊版程式產出的、
+            # 可能被手動覆蓋、可能來自另一台機器 —— 而唯一會發現的時機就是
+            # 現在。只檢查欄位存在等於只驗證「形狀對」，形狀對而內容洩漏的
+            # 表會一路通到模型裡，且分數會**變好**，因此不會有人起疑。
+            #
+            # 這一步的成本是掃兩欄比大小，相對於重算整個 cohort 微不足道。
+            assert_asof_respected(cached)
             log(f"讀取快取 {cache.name}（{cached.height:,} 列）")
             return cached
         log(f"快取 {cache.name} 的欄位與目前的 schema 不符，重算")
@@ -182,10 +191,31 @@ def build_cohort(
     # 取 max 是因為同一個月內可能有多筆交易（例如月中改方案），最後那個
     # 才是真正的到期日。
     #
-    # 這個 filter 順帶擋掉了 SPEC §2.1 的兩個哨兵值：19700101（Unix epoch，
+    # 第一個 filter 順帶擋掉了 SPEC §2.1 的兩個哨兵值：19700101（Unix epoch，
     # 等同 null）和 20361015（2036 年）都不在區間內，不會被選為 cutoff。
+    #
+    # ⚠️ **第二個 filter 是 as-of 截斷的一部分，不是資料清理。**
+    #
+    # 少了它，cutoff 本身就可能來自未來：實測有 158,766 筆交易的
+    # transaction_date 晚於自己宣告的 membership_expire_date（95.93% 是取消
+    # 紀錄，屬於補登慣例）。這種列在到期日當下**還不存在**，卻可以憑著它
+    # 攜帶的到期日替用戶製造出一個 cutoff。
+    #
+    # 這是紅線 1 的守門抓不到的洩漏形式：`assert_asof_respected()` 檢查的是
+    # 「last_tx <= cutoff」，而這裡出問題的是 **cutoff 這個基準點自己**。
+    # 基準點錯了，所有以它為準的檢查都會通過，卻全部建立在未來資訊上。
+    #
+    # 判準：一筆交易在它自己宣告的到期日當下可觀測，等價於
+    # `transaction_date <= membership_expire_date`。這個條件不循環（不依賴
+    # 尚未算出的 cutoff），而且一旦成立，`transaction_date <= cutoff` 也自動
+    # 成立。
+    #
+    # 代價：找不到任何「當下可觀測」交易的用戶會離開 cohort（實測 Feb 19 人、
+    # Mar 1 人），另有 Feb 156 / Mar 148 人的 cutoff 值改變。這是正確的行為 ——
+    # 部署時同樣算不出他們的 cutoff，硬留著等於假裝當時知道未來。
     cutoffs = (
         tx.filter(pl.col("membership_expire_date").is_between(spec.expire_start, spec.expire_end))
+        .filter(pl.col("transaction_date") <= pl.col("membership_expire_date"))
         .group_by("msno")
         .agg(pl.col("membership_expire_date").max().alias("cutoff"))
         .collect(engine="streaming")

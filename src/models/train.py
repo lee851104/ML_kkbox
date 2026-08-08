@@ -43,6 +43,7 @@ from src.config import REPO_ROOT, Paths, load_paths
 from src.data import FEB, MAR, build_cohort
 from src.evaluation import constant_log_loss, log_loss, repeat_vs_new, segment_report
 from src.features import FeatureSet, build_features, build_log_features
+from src.models.candidates import to_lgb_arrays
 
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "model_lgbm.yaml"
 
@@ -107,43 +108,27 @@ def load_model_config(path: Path | None = None) -> dict[str, Any]:
     return cfg
 
 
-def _to_arrays(fs: FeatureSet) -> tuple[np.ndarray, np.ndarray, list[int]]:
-    """轉成 LightGBM 需要的 numpy 格式，並算出類別特徵的欄位索引。
-
-    用索引而非欄名，是因為輸入是無欄名的 numpy 陣列。索引由 FeatureSet 的
-    欄位順序推導，不寫死 —— 特徵順序改了也不會對錯欄位。
-    """
-    X = fs.X.to_numpy().astype(np.float64)
-    y = fs.y.to_numpy().astype(np.int8)
-    cat_idx = [fs.X.columns.index(c) for c in fs.categorical]
-    return X, y, cat_idx
-
-
-def train_baseline(
-    paths: Paths | None = None,
-    config: dict[str, Any] | None = None,
+def load_cohort_features(
+    paths: Paths,
+    cfg: dict[str, Any],
     *,
     keep_features: list[str] | None = None,
     verbose: bool = True,
-) -> TrainResult:
-    """在 Feb cohort 上訓練，在 Mar cohort 上評估。
+) -> tuple[FeatureSet, FeatureSet]:
+    """建好 Feb（訓練）與 Mar（驗證）兩份特徵矩陣。
 
-    Args:
-        keep_features: 只保留這些特徵欄位。供消融實驗使用；None 代表全用。
+    從 `train_baseline` 抽出來，讓 M3 的模型比較與特徵篩選共用同一段載入
+    邏輯。三個套件如果各自載一次資料，「特徵集完全相同」這個前提就只是
+    口頭承諾而不是程式保證。
 
-    Returns:
-        TrainResult，含 Mar cohort 的 log loss、分群報告與特徵重要度。
+    Raises:
+        ValueError: 兩個 cohort 的特徵欄位不一致。
     """
-    paths = paths or load_paths()
-    cfg = config or load_model_config()
-    params = dict(cfg["model"])
-    train_cfg = cfg["training"]
 
     def log(msg: str = "") -> None:
         if verbose:
             print(msg, flush=True)
 
-    # ---- 資料 ----
     use_logs = cfg.get("features", {}).get("use_logs", False)
     log(f"載入 cohort（收聽特徵：{'啟用' if use_logs else '停用'}）...")
     feb_raw = build_cohort(FEB, paths, verbose=False)
@@ -171,8 +156,38 @@ def train_baseline(
     if feb.X.columns != mar.X.columns:
         raise ValueError("兩個 cohort 的特徵欄位不一致，模型無法套用")
 
-    X_feb, y_feb, cat_idx = _to_arrays(feb)
-    X_mar, y_mar, _ = _to_arrays(mar)
+    return feb, mar
+
+
+def train_baseline(
+    paths: Paths | None = None,
+    config: dict[str, Any] | None = None,
+    *,
+    keep_features: list[str] | None = None,
+    verbose: bool = True,
+) -> TrainResult:
+    """在 Feb cohort 上訓練，在 Mar cohort 上評估。
+
+    Args:
+        keep_features: 只保留這些特徵欄位。供消融實驗使用；None 代表全用。
+
+    Returns:
+        TrainResult，含 Mar cohort 的 log loss、分群報告與特徵重要度。
+    """
+    paths = paths or load_paths()
+    cfg = config or load_model_config()
+    params = dict(cfg["model"])
+    train_cfg = cfg["training"]
+
+    def log(msg: str = "") -> None:
+        if verbose:
+            print(msg, flush=True)
+
+    # ---- 資料 ----
+    feb, mar = load_cohort_features(paths, cfg, keep_features=keep_features, verbose=verbose)
+
+    X_feb, y_feb, cat_idx = to_lgb_arrays(feb)
+    X_mar, y_mar, _ = to_lgb_arrays(mar)
 
     # ---- Feb 內部切一小塊給 early stopping（Mar 全程不參與訓練）----
     X_tr, X_es, y_tr, y_es = train_test_split(
@@ -266,7 +281,7 @@ def cross_validate_feb(
     「若兩者差距過大，該差距本身就是要寫進報告的發現（概念漂移），不是要
     調掉的問題。」
     """
-    X, y, cat_idx = _to_arrays(feb)
+    X, y, cat_idx = to_lgb_arrays(feb)
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
     scores: list[float] = []
 

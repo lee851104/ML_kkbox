@@ -24,6 +24,11 @@ from src.config import REPO_ROOT
 from src.data import assert_asof_respected
 from src.evaluation import EPS, constant_log_loss, log_loss
 from src.features import assert_logs_within_cutoff, build_features
+from src.features.encoding import (
+    assert_encoding_is_oof,
+    fit_target_encoder,
+    oof_target_encode,
+)
 from tests.conftest import NODATA, SLOW, make_synthetic_cohort
 
 # 測試觀察期的上界。SPEC 紅線 7：不得使用 2017-04 之後的任何資料。
@@ -286,12 +291,23 @@ def test_red_line_2_real_log_features_are_clean(paths, cohort_name: str):
     assert_logs_within_cutoff(build_log_features(cohort_name, paths, verbose=False))
 
 
-@pytest.mark.skip(reason="紅線 4：等 M3 —— 還沒有合併多 cohort 的程式碼")
+@pytest.mark.skip(reason="紅線 4：改等 M6 —— M3 查明本專案目前沒有合併多 cohort 的地方")
 def test_red_line_4_groupkfold_when_cohorts_merged():
     """合併多 cohort 做 KFold 時必須用 GroupKFold(groups=msno)。
 
     實測 90.81% 的用戶跨兩期出現（見 test_data_contract.test_cohort_overlap）。
     在合併資料上做隨機切分，會讓同一個人同時出現在訓練與驗證集。
+
+    **M3 的結論：這條紅線目前無從觸發，阻塞里程碑改為 M6。**
+
+    M3 的三個實驗（模型比較、null importance 篩選、target encoding 對照）
+    全部沿用 §4.2 的 Feb 訓練 → Mar 驗證，沒有任何一處把兩個 cohort 併起來
+    切 fold。而本專案只有兩個帶標籤的 cohort，一旦合併就沒有時間外驗證集
+    可用 —— 合併在 M3 不但沒必要，還會摧毀 §4.2 的切分。
+
+    真正會需要它的是 M6：上線前通常會用「Feb + Mar 全部資料」重訓最終模型，
+    那時若要在合併資料上做任何 KFold，90.81% 的重疊就變成真正的洩漏。
+    測試留在清單裡（而不是刪掉），就是為了在那一刻仍然被 pytest 提醒。
     """
 
 
@@ -329,10 +345,62 @@ def test_red_line_5_feature_builder_is_stateless():
     )
 
 
-@pytest.mark.skip(reason="紅線 6：等 M3 —— 還沒有 target encoding")
+@NODATA
 def test_red_line_6_target_encoding_is_oof():
     """target encoding 必須 out-of-fold。
 
     payment_method_id 是高基數類別（cohort 內實測 33 種），直接 target
     encode 會讓 CV 飆高、實測崩盤。
+
+    **測法**：餵一份「每個類別只出現一次」的資料。這是洩漏的極端形式 ——
+    naive 編碼下每一格的分母只有自己那一列，編碼值必然是自己的標籤（平滑
+    前）。OOF 編碼則因為該類別在其他折從未出現，只能退回全體先驗。
+
+    兩者的差別因此是**質的**而不是量的：naive 的編碼與標籤完全相關，
+    OOF 的編碼是一個常數。分不出這兩者的實作會被這個測試擋下來。
     """
+    n = 20
+    values = pl.Series("cat", [f"c{i}" for i in range(n)])  # 每個類別各一列
+    y = pl.Series("y", [i % 2 for i in range(n)])
+
+    oof = oof_target_encode(values, y, n_splits=5, seed=0, smoothing=0.0)
+
+    # 其他折從未見過這個類別 → 一律退回該折的先驗，不含自己的標籤。
+    assert oof.n_unique() <= 5, f"OOF 編碼出現 {oof.n_unique()} 種值，疑似洩漏了自己的標籤"
+    assert_encoding_is_oof(oof, y)
+
+
+@NODATA
+def test_red_line_6_guard_catches_naive_encoding():
+    """守門必須擋下 naive（全表擬合）的 target encoding。
+
+    與紅線 1、2 同樣的測法：真的算一份違規的編碼餵進去，確認它會 raise。
+    光證明合規的資料會通過是不夠的 —— 一個永遠回傳 True 的空檢查也會通過。
+    """
+    n = 20
+    values = pl.Series("cat", [f"c{i}" for i in range(n)])
+    y = pl.Series("y", [i % 2 for i in range(n)])
+
+    # smoothing=0：不往先驗拉，讓「每個類別只有自己一列」的洩漏完全暴露。
+    naive = fit_target_encoder(values, y, smoothing=0.0).transform(values)
+    assert naive.to_list() == y.cast(pl.Float64).to_list(), "naive 編碼應該逐格等於標籤"
+
+    with pytest.raises(AssertionError, match="紅線 6 違反"):
+        assert_encoding_is_oof(naive, y)
+
+
+@NODATA
+def test_red_line_6_smoothing_shrinks_rare_categories():
+    """平滑必須把小樣本類別拉回先驗，且不影響大樣本類別。
+
+    平滑與 OOF 是兩件不同的事（見 encoding 模組註解）：OOF 擋標籤洩漏，
+    平滑擋小樣本雜訊。兩者都做才安全，所以兩者都要有測試。
+    """
+    # rare 出現 1 次（標籤 1），common 出現 100 次（標籤全 0）。先驗約 0.0099。
+    values = pl.Series("cat", ["rare"] + ["common"] * 100)
+    y = pl.Series("y", [1] + [0] * 100)
+
+    enc = fit_target_encoder(values, y, smoothing=10.0)
+    assert enc.mapping["rare"] < 0.15, "只出現一次的類別不該拿到接近 1.0 的編碼"
+    assert enc.mapping["rare"] > enc.prior, "但它確實比先驗高一點，訊號不該被抹平"
+    assert enc.mapping["common"] < enc.prior, "出現 100 次的類別幾乎不受平滑影響"

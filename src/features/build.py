@@ -29,9 +29,12 @@ cutoff 幾天」。理由是部署現實：訓練集的日期落在 2017-02，�
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import polars as pl
+
+from src.features.logs import assert_logs_within_cutoff
 
 # LightGBM 原生支援的類別特徵。
 #
@@ -92,6 +95,24 @@ class FeatureSet:
             categorical=tuple(c for c in self.categorical if c in columns),
         )
 
+    def take(self, idx: Sequence[int] | pl.Series) -> FeatureSet:
+        """取列的子集（供 early stopping 切分與 fold 切分使用）。
+
+        M1 是先把 FeatureSet 轉成 numpy 才切列的。M3 不能那樣做 ——
+        XGBoost 與 CatBoost 需要帶欄名與 dtype 的表格才分得出哪幾欄是類別
+        特徵，一轉成無欄名的浮點矩陣就沒了。所以切列這件事往前挪到
+        polars 這一層，各套件各自在自己的邊界轉換。
+
+        `msno` 一起帶著走，否則子集就無法再做 §4.5 的分群回報。
+        """
+        i = pl.Series(idx) if not isinstance(idx, pl.Series) else idx
+        return FeatureSet(
+            X=self.X[i],
+            y=self.y[i],
+            msno=self.msno[i],
+            categorical=self.categorical,
+        )
+
     def __repr__(self) -> str:  # pragma: no cover - 只影響顯示
         return f"FeatureSet({self.X.height:,} 列 × {self.X.width} 特徵, 流失率 {self.y.mean():.4%})"
 
@@ -117,6 +138,27 @@ def _days_before_cutoff(col: str, alias: str) -> pl.Expr:
     """
     days = (_as_date("cutoff") - _as_date(col)).dt.total_days()
     return pl.when(days >= 0).then(days).otherwise(None).alias(alias)
+
+
+def _registered_after_cutoff() -> pl.Expr:
+    """這位用戶的 members_v3 資料在 cutoff 當下**還不存在**。
+
+    `members_v3.csv` 是一份**快照**，不受 as-of 截斷保護（§4.3 的截斷只作用
+    在 transactions 與 user_logs）。實測 Feb cohort 有 6 人、Mar cohort 有 2 人
+    的 `registration_init_time` 晚於自己的 cutoff。
+
+    對這幾個人而言，「他住哪個城市」「從哪個管道註冊」「性別是什麼」在
+    評分時點通通不存在 —— 那筆會員資料是之後才建立的。把它們餵進模型，
+    等於用未來才知道的事實預測過去。
+
+    原本的處理只把 `days_since_registration` 轉成 null（因為天數會是負的，
+    很顯眼），卻留下了同一列的其他欄位。**負數只是症狀，整列不該可見才是
+    病因** —— 所以這個旗標一開，該用戶的**全部** members 屬性都退回缺失。
+
+    null 一律視為「不晚於」：`registration_init_time` 為 null 代表查不到註冊
+    日，那是缺資料，不是「註冊在未來」的證據，不該連帶把其他欄位也砍掉。
+    """
+    return (_as_date("registration_init_time") > _as_date("cutoff")).fill_null(False)
 
 
 def build_features(df: pl.DataFrame, logs: pl.DataFrame | None = None) -> FeatureSet:
@@ -164,6 +206,13 @@ def build_features(df: pl.DataFrame, logs: pl.DataFrame | None = None) -> Featur
     price = pl.col("last_plan_list_price")
     plan_days = pl.col("last_payment_plan_days")
 
+    # members_v3 的快照在 cutoff 當下還不存在的那幾位。見 _registered_after_cutoff。
+    hidden = _registered_after_cutoff()
+
+    def member_col(col: str) -> pl.Expr:
+        """members_v3 來的欄位：快照不可見時退回 null。"""
+        return pl.when(hidden).then(None).otherwise(pl.col(col))
+
     X = df.select(
         # --- 時間特徵：一律相對於 cutoff，不留原始日期 ---
         _days_before_cutoff("first_tx", "tenure_days"),
@@ -191,22 +240,31 @@ def build_features(df: pl.DataFrame, logs: pl.DataFrame | None = None) -> Featur
         # 免費方案本來就收 0 元，與定價非 0 卻沒收到錢完全不同。
         (price == 0).cast(pl.Float64).alias("is_free_plan"),
         ((paid == 0) & (price > 0)).cast(pl.Float64).alias("zero_collected"),
-        # --- 用戶屬性 ---
+        # --- 用戶屬性（全部來自 members_v3 快照，快照不可見時退回缺失）---
         # in_members 本身有訊號：查不到的那 11.66% 流失率 5.02%，低於整體 6.39%。
-        pl.col("in_members").cast(pl.Float64),
+        # 註冊日晚於 cutoff 的人在此一律算作「查不到」—— 在評分時點，他們
+        # 確實還不在 members_v3 裡。
+        (~hidden & pl.col("in_members")).cast(pl.Float64).alias("in_members"),
         # bd 只有 39.18% 落在合理範圍。離群值不截斷也不補值，直接設 null 讓
         # LightGBM 走缺失分支；另外保留「原本是不是有效值」當獨立特徵。
-        pl.when(pl.col("bd").is_between(BD_MIN, BD_MAX))
-        .then(pl.col("bd"))
+        pl.when(member_col("bd").is_between(BD_MIN, BD_MAX))
+        .then(member_col("bd"))
         .otherwise(None)
         .cast(pl.Float64)
         .alias("bd_clean"),
-        pl.col("bd").is_between(BD_MIN, BD_MAX).fill_null(False).cast(pl.Float64).alias("bd_valid"),
+        member_col("bd")
+        .is_between(BD_MIN, BD_MAX)
+        .fill_null(False)
+        .cast(pl.Float64)
+        .alias("bd_valid"),
         # --- 類別特徵（LightGBM 原生處理，負值代表缺失）---
-        pl.col("city").fill_null(MISSING_CATEGORY).cast(pl.Int32),
-        pl.col("registered_via").fill_null(MISSING_CATEGORY).cast(pl.Int32),
+        member_col("city").fill_null(MISSING_CATEGORY).cast(pl.Int32).alias("city"),
+        member_col("registered_via")
+        .fill_null(MISSING_CATEGORY)
+        .cast(pl.Int32)
+        .alias("registered_via"),
         pl.col("last_payment_method_id").cast(pl.Int32),
-        pl.col("gender")
+        member_col("gender")
         .replace_strict(GENDER_CODES, default=MISSING_CATEGORY, return_dtype=pl.Int32)
         .alias("gender_code"),
     )
@@ -233,6 +291,16 @@ def _attach_logs(msno: pl.Series, X: pl.DataFrame, logs: pl.DataFrame) -> pl.Dat
     """
     if "msno" not in logs.columns:
         raise KeyError("收聽特徵表缺少 msno 欄位，無法 join")
+
+    # ⚠️ **守門要放在這個公開邊界上，不能只放在 build_log_features() 裡。**
+    #
+    # `build_features(df, logs)` 是公開 API，logs 從哪來由呼叫端決定 ——
+    # 可能是自己讀的 parquet、可能是消融實驗手動組出來的子集、可能是未來
+    # 某條還沒寫的路徑。只在生產端守門，等於假設「所有人都會走那條路」。
+    #
+    # 紅線 1 的守門就是這樣設計的（`build_cohort()` 每次都跑），這裡讓紅線 2
+    # 對齊同一個標準：**資料要進入模型之前，在最後一道門再確認一次。**
+    assert_logs_within_cutoff(logs)
 
     joined = (
         pl.DataFrame({"msno": msno})

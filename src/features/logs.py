@@ -260,6 +260,14 @@ def build_log_features(
     cache = paths.interim / f"{spec.name}_log_features.parquet"
     if cache.exists() and not force:
         cached = pl.read_parquet(cache)
+        # ⚠️ **快取命中也要跑守門**，理由同 `build_cohort()`：快取是檔案不是
+        # 保證。一張 `log_min_days_before` 為負的舊快取，代表裡面含有到期日
+        # **之後**的收聽行為 —— 那是標籤的結果而不是原因，餵進模型分數會
+        # 變好，因此不會有人察覺。
+        #
+        # 守門函式本身會在缺欄位時 raise KeyError，所以這一行同時也是
+        # schema 檢查，不必另外寫一份。
+        assert_logs_within_cutoff(cached)
         log(f"讀取快取 {cache.name}（{cached.height:,} 列）")
         return cached
 
