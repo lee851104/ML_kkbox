@@ -16,6 +16,7 @@ dependencies = [
     "lightgbm>=4.5",    # M1 baseline 模型（SPEC §8 主力）
     "scikit-learn>=1.5",# M1 StratifiedKFold 與後續 M4 校準
     "numpy>=2.0",       # M1 LightGBM 的輸入格式，直接 import 所以明列
+    "mlflow>=2.16",     # M1 實驗追蹤（SPEC §8 · 手冊六項硬性規定第 4 條）
 ]
 
 [dependency-groups]

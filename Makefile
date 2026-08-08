@@ -7,7 +7,7 @@
 #    效果完全相同 —— 本檔案只是那些指令的集中索引。安裝方式見 README。
 
 .DEFAULT_GOAL := help
-.PHONY: help setup data data-all lint format test test-fast test-ci eda clean features train eval serve
+.PHONY: help setup data data-all lint format test test-fast test-ci eda train mlflow clean features eval serve
 
 help:
 	@echo "可用目標："
@@ -24,9 +24,11 @@ help:
 	@echo "  test-ci    只跑不需資料的純邏輯測試，要求零 skip"
 	@echo ""
 	@echo "  eda        產生 EDA 圖表到 reports/figures/"
+	@echo "  train      M1 LightGBM baseline（含 5-fold 標準差與 MLflow 追蹤）"
+	@echo "  mlflow     開啟 MLflow UI 檢視實驗紀錄"
 	@echo "  clean      清除 __pycache__ / .pytest_cache / .ruff_cache"
 	@echo ""
-	@echo "  features / train / eval / serve   尚未實作，見各目標訊息"
+	@echo "  features / eval / serve   尚未實作，見各目標訊息"
 
 # --- 環境與資料 ------------------------------------------------------------
 
@@ -71,6 +73,9 @@ eda:
 # 0.30746 門檻會回傳非零離開碼。
 train:
 	uv run python scripts/train.py
+
+mlflow:
+	uv run mlflow ui --backend-store-uri sqlite:///mlflow.db
 
 clean:
 	uv run python -c "import shutil, pathlib; [shutil.rmtree(p, ignore_errors=True) for p in list(pathlib.Path('.').rglob('__pycache__')) + [pathlib.Path('.pytest_cache'), pathlib.Path('.ruff_cache')]]; print('已清除 __pycache__ / .pytest_cache / .ruff_cache')"

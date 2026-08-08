@@ -37,7 +37,7 @@ import lightgbm as lgb
 import numpy as np
 import polars as pl
 import yaml
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold, train_test_split
 
 from src.config import REPO_ROOT, Paths, load_paths
 from src.data import FEB, MAR, build_cohort
@@ -71,6 +71,24 @@ class TrainResult:
     def improvement(self) -> float:
         """相對常數基準的改善比例。"""
         return 1 - self.logloss / self.baseline_logloss
+
+
+@dataclass
+class CVResult:
+    """Feb cohort 內部 5-fold 的結果。**只用於估計變異數，不用於模型選擇。**"""
+
+    fold_scores: list[float]
+    n_splits: int
+    num_boost_round: int
+
+    @property
+    def mean(self) -> float:
+        return float(np.mean(self.fold_scores))
+
+    @property
+    def std(self) -> float:
+        # ddof=1：這是樣本標準差。5 個 fold 是母體的樣本，不是母體本身。
+        return float(np.std(self.fold_scores, ddof=1))
 
 
 def load_model_config(path: Path | None = None) -> dict[str, Any]:
@@ -203,6 +221,121 @@ def train_baseline(
     )
 
 
+def cross_validate_feb(
+    feb: FeatureSet,
+    params: dict[str, Any],
+    *,
+    num_boost_round: int,
+    n_splits: int,
+    seed: int,
+    verbose: bool = True,
+) -> CVResult:
+    """在 Feb cohort 內部做 StratifiedKFold，估計分數的變異數。
+
+    SPEC §4.2 對這個數字的定位：「用途**僅限**估計模型變異數（回報標準差）。
+    模型選擇一律以時間外驗證分數為準。」所以它回答的是「這個分數穩不穩」，
+    不是「這個模型好不好」。
+
+    每個 fold 用固定的 num_boost_round，不各自 early stopping —— 要衡量的是
+    「換一批資料分數差多少」，讓各 fold 自己找停點會把停點的變異也算進來，
+    兩種來源就混在一起了。
+
+    ⚠️ 這個分數會明顯**優於** Mar cohort 的時間外分數，而且那個差距不是
+    bug。fold 內的訓練與驗證同屬 2017-02 到期的族群，分布相同；Mar cohort
+    的流失率是 8.99% 而 Feb 是 6.39%，是不同的分布。SPEC §4.2 說得很清楚：
+    「若兩者差距過大，該差距本身就是要寫進報告的發現（概念漂移），不是要
+    調掉的問題。」
+    """
+    X, y, cat_idx = _to_arrays(feb)
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=seed)
+    scores: list[float] = []
+
+    for i, (tr_idx, va_idx) in enumerate(skf.split(X, y), 1):
+        dtrain = lgb.Dataset(X[tr_idx], y[tr_idx], categorical_feature=cat_idx)
+        booster = lgb.train(params, dtrain, num_boost_round=num_boost_round)
+        pred = booster.predict(X[va_idx])
+        score = log_loss(y[va_idx], pred)
+        scores.append(score)
+        if verbose:
+            print(f"  fold {i}/{n_splits}  log loss {score:.5f}", flush=True)
+
+    return CVResult(fold_scores=scores, n_splits=n_splits, num_boost_round=num_boost_round)
+
+
+def log_to_mlflow(
+    result: TrainResult,
+    cv: CVResult | None,
+    cfg: dict[str, Any],
+    paths: Paths,
+) -> str | None:
+    """把這次實驗記進 MLflow（SPEC §8 · 手冊硬性規定第 4 條）。
+
+    在報表印出**之後**才呼叫：追蹤失敗不該讓辛苦訓練出來的數字消失在
+    stack trace 裡。
+    """
+    import mlflow
+
+    tracking = cfg.get("tracking", {})
+    if not tracking.get("enabled", False):
+        return None
+
+    # 後端 URI。設定檔給的是相對路徑（sqlite:///mlflow.db），要展開成絕對路徑，
+    # 否則 db 會落在「當下工作目錄」—— 從 repo 根目錄跑和從別處跑會產生兩份。
+    backend = tracking.get("backend", "sqlite:///mlflow.db")
+    if backend.startswith("sqlite:///") and not backend.startswith("sqlite:////"):
+        rel = backend.removeprefix("sqlite:///")
+        backend = f"sqlite:///{(REPO_ROOT / rel).as_posix()}"
+    mlflow.set_tracking_uri(backend)
+
+    # 用資料庫後端時，artifact 存放位置必須在建立 experiment 時指定 ——
+    # 資料庫只存 metadata，模型檔與 CSV 仍然是檔案。
+    exp_name = tracking.get("experiment", "kkbox-churn")
+    if mlflow.get_experiment_by_name(exp_name) is None:
+        artifact_dir = REPO_ROOT / tracking.get("artifact_dir", "mlartifacts")
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        mlflow.create_experiment(exp_name, artifact_location=artifact_dir.as_uri())
+    mlflow.set_experiment(exp_name)
+
+    with mlflow.start_run(run_name=tracking.get("run_name")) as run:
+        mlflow.log_params({f"lgb.{k}": v for k, v in cfg["model"].items()})
+        mlflow.log_params({f"train.{k}": v for k, v in cfg["training"].items()})
+        mlflow.log_param("best_iteration", result.best_iteration)
+        mlflow.log_param("n_features", result.importance.height)
+
+        mlflow.log_metrics(
+            {
+                "mar_logloss": result.logloss,
+                "constant_baseline": result.baseline_logloss,
+                "improvement": result.improvement,
+            }
+        )
+        for row in result.segments.iter_rows(named=True):
+            tag = {"全體": "overall", "重複用戶": "repeat", "新進用戶": "new"}[row["分群"]]
+            mlflow.log_metric(f"logloss_{tag}", row["log_loss"])
+            mlflow.log_metric(f"mean_pred_{tag}", row["平均預測機率"])
+            mlflow.log_metric(f"actual_rate_{tag}", row["實際流失率"])
+
+        if cv is not None:
+            mlflow.log_metrics({"cv_mean": cv.mean, "cv_std": cv.std})
+            for i, s in enumerate(cv.fold_scores, 1):
+                mlflow.log_metric(f"cv_fold_{i}", s)
+            # 時間外分數與 fold 內分數的差距 —— SPEC §4.2 要求寫進報告的發現。
+            mlflow.log_metric("oot_minus_cv", result.logloss - cv.mean)
+
+        # 模型與特徵重要度存成 artifact。用 save_model 而非 mlflow.lightgbm，
+        # 產出的 txt 可以用 lgb.Booster(model_file=...) 直接載回，不綁 MLflow 版本。
+        out = paths.interim / "m1_artifacts"
+        out.mkdir(parents=True, exist_ok=True)
+        model_path = out / "lgbm_baseline.txt"
+        imp_path = out / "feature_importance.csv"
+        result.booster.save_model(str(model_path), num_iteration=result.best_iteration)
+        result.importance.write_csv(imp_path)
+        mlflow.log_artifact(str(model_path))
+        mlflow.log_artifact(str(imp_path))
+
+        return run.info.run_id
+
+
 def _print_report(r: TrainResult) -> None:
     pl.Config.set_tbl_rows(30)
     pl.Config.set_tbl_width_chars(140)
@@ -227,13 +360,52 @@ def _print_report(r: TrainResult) -> None:
         print(f"\n完全沒被用到的特徵 {zero.height} 個：{zero['feature'].to_list()}")
 
 
+def _print_cv(r: TrainResult, cv: CVResult) -> None:
+    print(f"\n--- Feb 內部 {cv.n_splits}-fold（SPEC §7 要求回報標準差）---")
+    for i, s in enumerate(cv.fold_scores, 1):
+        print(f"  fold {i}  {s:.5f}")
+    print(f"  平均 {cv.mean:.5f} ± {cv.std:.5f}")
+
+    gap = r.logloss - cv.mean
+    print(f"\n  時間外（Mar）{r.logloss:.5f}  −  fold 內（Feb）{cv.mean:.5f}  =  {gap:+.5f}")
+    print(f"  差距是標準差的 {gap / cv.std:.0f} 倍。")
+    print(
+        "\n  這個差距不是 bug，是概念漂移的量化。fold 內的訓練與驗證同屬 2017-02\n"
+        "  到期族群（流失率 6.39%），Mar cohort 是 8.99% 的另一個分布。\n"
+        "  SPEC §4.2：「該差距本身就是要寫進報告的發現，不是要調掉的問題。」\n"
+        "  ⚠️ 只報 fold 內分數會讓模型看起來好一倍 —— 那是最常見的自欺方式。"
+    )
+
+
 def main() -> int:
     try:
-        result = train_baseline()
+        cfg = load_model_config()
+        paths = load_paths()
+        result = train_baseline(paths, cfg)
     except FileNotFoundError as e:
         sys.exit(f"{e}\n請先執行 uv run python scripts/download.py")
 
+    cv = None
+    cv_cfg = cfg.get("cv", {})
+    if cv_cfg.get("enabled", False):
+        print(f"\n{cv_cfg['n_splits']}-fold 變異數估計（固定 {result.best_iteration} 輪）...")
+        feb = build_features(build_cohort(FEB, paths, verbose=False))
+        cv = cross_validate_feb(
+            feb,
+            dict(cfg["model"]),
+            num_boost_round=result.best_iteration,
+            n_splits=cv_cfg["n_splits"],
+            seed=cv_cfg["seed"],
+        )
+
+    # 先印報表再記 MLflow：追蹤失敗不該讓訓練結果消失在 stack trace 裡。
     _print_report(result)
+    if cv is not None:
+        _print_cv(result, cv)
+
+    run_id = log_to_mlflow(result, cv, cfg, paths)
+    if run_id:
+        print(f"\nMLflow run {run_id}　（用 uv run mlflow ui 檢視）")
 
     if not result.beats_baseline:
         print(f"\n❌ Mar cohort log loss {result.logloss:.5f} 未打敗基準 {M1_THRESHOLD}")

@@ -53,3 +53,31 @@ training:
   # SPEC §4.2 也明文允許「在 Feb cohort 內部另做 StratifiedKFold」。
   inner_valid_fraction: 0.2
   inner_split_seed: 42
+
+# SPEC §7 要求 M1「回報 5-fold 標準差」。
+#
+# SPEC §4.2 對它的定位寫得很明確：「在 Feb cohort 內部另做 5-fold
+# StratifiedKFold，用途**僅限**估計模型變異數。模型選擇一律以時間外驗證
+# 分數為準。」所以這個數字不拿來挑模型，只用來回答「這個分數穩不穩」。
+#
+# 每個 fold 用**固定輪數**而非各自 early stopping：變異數要衡量的是
+# 「換一批資料，分數會差多少」，各 fold 自己找停點會把停點的變異也混進來，
+# 兩種來源就分不開了。輪數取主訓練的 best_iteration。
+cv:
+  enabled: true
+  n_splits: 5
+  seed: 42
+
+# 實驗追蹤（SPEC §8 · 手冊六項硬性規定第 4 條）。
+#
+# ⚠️ 後端用 SQLite 而不是傳統的 ./mlruns 目錄。MLflow 3.x 起檔案系統後端
+# 進入維護模式，直接呼叫會拋 MlflowException 要求改用資料庫後端。
+# SQLite 只是 repo 根目錄下的一個檔案，不需要跑伺服器，已在 .gitignore 中。
+#
+# 看結果：make mlflow（等同 uv run mlflow ui --backend-store-uri sqlite:///mlflow.db）
+tracking:
+  enabled: true
+  backend: sqlite:///mlflow.db
+  artifact_dir: mlartifacts
+  experiment: kkbox-churn
+  run_name: m1_lgbm_baseline

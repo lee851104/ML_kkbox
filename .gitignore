@@ -36,6 +36,8 @@ venv/
 
 # === 實驗追蹤 ===
 mlruns/
+mlflow.db
+mlartifacts/
 wandb/
 outputs/
 
