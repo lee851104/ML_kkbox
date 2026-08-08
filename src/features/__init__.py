@@ -9,20 +9,24 @@ from src.features.build import (
     build_features,
 )
 from src.features.logs import (
+    LOG_GROUPS,
     LOG_WINDOWS,
     assert_logs_within_cutoff,
     build_log_features,
+    log_feature_group,
     narrow_logs,
     window_bounds,
 )
 
 __all__ = [
     "CATEGORICAL",
+    "LOG_GROUPS",
     "LOG_WINDOWS",
     "FeatureSet",
     "assert_logs_within_cutoff",
     "build_features",
     "build_log_features",
+    "log_feature_group",
     "narrow_logs",
     "window_bounds",
 ]

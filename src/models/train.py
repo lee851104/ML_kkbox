@@ -123,9 +123,13 @@ def train_baseline(
     paths: Paths | None = None,
     config: dict[str, Any] | None = None,
     *,
+    keep_features: list[str] | None = None,
     verbose: bool = True,
 ) -> TrainResult:
     """在 Feb cohort 上訓練，在 Mar cohort 上評估。
+
+    Args:
+        keep_features: 只保留這些特徵欄位。供消融實驗使用；None 代表全用。
 
     Returns:
         TrainResult，含 Mar cohort 的 log loss、分群報告與特徵重要度。
@@ -156,6 +160,11 @@ def train_baseline(
 
     feb = build_features(feb_raw, feb_logs)
     mar = build_features(mar_raw, mar_logs)
+
+    if keep_features is not None:
+        feb = feb.select(keep_features)
+        mar = mar.select(keep_features)
+
     log(f"  訓練 Feb {feb.X.height:,} 列 × {feb.X.width} 特徵，流失率 {feb.y.mean():.4%}")
     log(f"  驗證 Mar {mar.X.height:,} 列 × {mar.X.width} 特徵，流失率 {mar.y.mean():.4%}")
 

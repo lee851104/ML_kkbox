@@ -49,6 +49,37 @@ LOG_FILES = ("user_logs.csv", "user_logs_v2.csv")
 # 播放次數的五個分桶。num_100 是完播（超過 98.5%），完播率的分子。
 PLAY_COLUMNS = ("num_25", "num_50", "num_75", "num_985", "num_100")
 
+# 收聽特徵的四個語意分組，用於消融實驗。
+#
+# 這是 RFM 框架套到訂閱行為上的版本：Recency（多久沒用）、Frequency（多常用）、
+# Intensity（用得多深）、Trend（用量在漲還是在跌）。分組的用意不是整理，是要
+# 回答一個具體問題 —— **M0 的 EDA 顯示活躍「水準」無法從 Feb 外推到 Mar，
+# 只有「趨勢」兩邊方向一致。** 分組消融能把這個觀察變成量化結論。
+LOG_GROUPS: tuple[str, ...] = ("recency", "frequency", "intensity", "trend")
+
+_RECENCY = frozenset({"log_min_days_before", "log_max_days_before"})
+_FREQUENCY_SUFFIX = ("_active_days", "_active_ratio")
+_INTENSITY_SUFFIX = ("_secs", "_plays", "_unq", "_completed", "_completion", "_secs_per_active_day")
+
+
+def log_feature_group(name: str) -> str | None:
+    """把一個欄名歸類到 R/F/I/T。非收聽特徵回 None。
+
+    用規則判斷而不是寫死清單：加了新窗口（例如 60 天）之後不必同步維護
+    兩個地方，否則新特徵會靜靜地落在所有分組之外，消融實驗就漏掉它。
+    """
+    if not name.startswith("log"):
+        return None
+    if name in _RECENCY:
+        return "recency"
+    if name.startswith("log_trend"):
+        return "trend"
+    if name.endswith(_FREQUENCY_SUFFIX):
+        return "frequency"
+    if name.endswith(_INTENSITY_SUFFIX):
+        return "intensity"
+    return None  # log_has_logs 等不屬於任何行為分組的旗標
+
 
 def _to_date(yyyymmdd: int) -> date:
     s = str(yyyymmdd)

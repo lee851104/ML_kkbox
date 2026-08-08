@@ -75,6 +75,23 @@ class FeatureSet:
     def names(self) -> list[str]:
         return self.X.columns
 
+    def select(self, columns: list[str]) -> FeatureSet:
+        """取欄位子集，供消融實驗使用。
+
+        `categorical` 會同步過濾 —— 忘了這一步的話，LightGBM 會拿到指向
+        不存在欄位的類別索引，而且不一定會報錯，可能只是把錯的欄位當成
+        類別特徵處理。
+        """
+        missing = set(columns) - set(self.X.columns)
+        if missing:
+            raise KeyError(f"要保留的欄位不存在：{sorted(missing)}")
+        return FeatureSet(
+            X=self.X.select(columns),
+            y=self.y,
+            msno=self.msno,
+            categorical=tuple(c for c in self.categorical if c in columns),
+        )
+
     def __repr__(self) -> str:  # pragma: no cover - 只影響顯示
         return f"FeatureSet({self.X.height:,} 列 × {self.X.width} 特徵, 流失率 {self.y.mean():.4%})"
 
