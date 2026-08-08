@@ -23,7 +23,8 @@ import pytest
 from src.config import REPO_ROOT
 from src.data import assert_asof_respected
 from src.evaluation import EPS, constant_log_loss, log_loss
-from tests.conftest import NODATA, SLOW
+from src.features import build_features
+from tests.conftest import NODATA, SLOW, make_synthetic_cohort
 
 # 測試觀察期的上界。SPEC 紅線 7：不得使用 2017-04 之後的任何資料。
 MAX_ALLOWED_DATE = 20170430
@@ -257,13 +258,38 @@ def test_red_line_4_groupkfold_when_cohorts_merged():
     """
 
 
-@pytest.mark.skip(reason="紅線 5：等 M1 —— 還沒有前處理 pipeline")
-def test_red_line_5_preprocessing_inside_pipeline():
-    """imputation / scaling / encoding 的統計量必須在 fold 內計算。
+@NODATA
+def test_red_line_5_feature_builder_is_stateless():
+    """特徵建構不得依賴整批資料的統計量。
 
-    全表 fillna(df.mean()) 會把驗證集的資訊倒灌進訓練集。SPEC §5 註明
-    「AI 產生的程式碼幾乎必犯」，所以這條要在 M1 建模型時就守住。
+    **測法**：對完整資料建一次特徵，再對其中一個子集建一次，比對相同那幾列
+    的值是否逐格相同。
+
+    為什麼這樣測得出來：任何「從資料學來的」轉換 —— `fillna(df.mean())`、
+    標準化、類別頻率編碼、target encoding —— 算出來的統計量都會隨輸入的
+    列集合而變。子集的平均數不等於全集的平均數，於是同一位用戶在兩次呼叫
+    中會得到不同的特徵值，這個測試就會紅。
+
+    反過來說，只要這個測試是綠的，紅線 5 就不可能被違反 —— 因為根本沒有
+    跨列的統計量存在，也就沒有東西可以從驗證集倒灌進訓練集。
+
+    這比「小心翼翼地在每個 fold 內 fit」可靠得多。SPEC §5 註明這條
+    「AI 產生的程式碼幾乎必犯」，而最好的防法是讓它無從犯起。
+
+    ⚠️ M3 若引入 target encoding，本測試會失敗 —— 那是正確的行為。屆時
+    編碼必須移進 fold 內的 pipeline，並由紅線 6 的測試接手守門。
     """
+    full = make_synthetic_cohort()
+    subset_idx = [0, 2, 5, 7]
+
+    from_full = build_features(full).X[subset_idx]
+    from_subset = build_features(full[subset_idx]).X
+
+    assert from_full.columns == from_subset.columns
+    assert from_full.equals(from_subset), (
+        "同一位用戶在完整資料與子集上算出不同的特徵值 —— "
+        "代表特徵建構用到了跨列的統計量，違反紅線 5。"
+    )
 
 
 @pytest.mark.skip(reason="紅線 6：等 M3 —— 還沒有 target encoding")

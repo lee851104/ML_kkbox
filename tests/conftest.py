@@ -75,3 +75,88 @@ def feb_cohort(paths: Paths) -> pl.DataFrame:
 @pytest.fixture(scope="session")
 def mar_cohort(paths: Paths) -> pl.DataFrame:
     return _cohort(paths, MAR)
+
+
+def make_synthetic_cohort() -> pl.DataFrame:
+    """手刻一張迷你 cohort 表，欄位與 build_cohort 的輸出一致。
+
+    用途是讓特徵層的測試不必依賴 34 GB 原始資料，因而能標成 nodata 在 CI 上
+    執行。列的內容刻意涵蓋會出事的邊界：跨月與跨年的日期差、方案天數 0、
+    實付 0（免費方案 vs 零收款兩種）、bd 離群值、不在 members_v3 的用戶、
+    以及註冊日晚於 cutoff 的髒資料。
+
+    全部寫死不用亂數 —— 測試失敗時要能一眼看出是哪一列出問題。
+    """
+    return pl.DataFrame(
+        {
+            "msno": [f"u{i}" for i in range(8)],
+            "is_churn": [0, 1, 0, 1, 0, 1, 0, 1],
+            # u1 的 cutoff 跨月：20170301 - 20170228 應該是 1 天而不是 73
+            "cutoff": [
+                20170228,
+                20170301,
+                20170216,
+                20170228,
+                20170101,
+                20170228,
+                20170215,
+                20170228,
+            ],
+            "n_tx": [13, 1, 17, 2, 25, 1, 8, 3],
+            "first_tx": [
+                20160216,
+                20170228,
+                20151018,
+                20170101,
+                20150101,
+                20170220,
+                20160801,
+                20170115,
+            ],
+            "last_tx": [
+                20170216,
+                20170301,
+                20170218,
+                20170228,
+                20170101,
+                20170228,
+                20170215,
+                20170228,
+            ],
+            "n_cancel_hist": [1, 0, 0, 2, 0, 1, 0, 0],
+            "mean_paid": [99.0, 0.0, 99.0, 149.0, 180.0, 0.0, 149.0, 99.0],
+            "last_is_cancel": [1, 0, 0, 1, 0, 1, 0, 0],
+            "last_is_auto_renew": [1, 0, 1, 1, 1, 0, 1, 0],
+            "last_actual_amount_paid": [99, 0, 99, 0, 180, 0, 149, 99],
+            #                                 ↑ 免費方案      ↑ 零收款（定價 149）
+            "last_plan_list_price": [99, 0, 99, 149, 180, 0, 149, 99],
+            "last_payment_plan_days": [30, 7, 30, 30, 90, 0, 30, 30],
+            #                                            ↑ 方案天數 0，除法要擋
+            "last_payment_method_id": [41, 38, 41, 40, 39, 41, 37, 36],
+            "city": [1, 13, 5, None, 1, 22, 4, None],
+            "bd": [0, 25, -7168, None, 34, 2016, 45, None],
+            #      ↑ 0   ↑ 有效  ↑ 極端負值      ↑ 極端正值
+            "gender": ["male", None, "female", None, "male", None, "female", None],
+            "registered_via": [7, 9, 7, None, 3, 4, 7, None],
+            # u5 的註冊日晚於 cutoff（髒資料），年資應轉成 null 而非負數
+            "registration_init_time": [
+                20160216,
+                20170101,
+                20140310,
+                None,
+                20040326,
+                20170330,
+                20150612,
+                None,
+            ],
+            "in_members": [True, True, True, False, True, True, True, False],
+        },
+        schema_overrides={
+            "is_churn": pl.Int64,
+            "n_tx": pl.UInt32,
+            "city": pl.Int64,
+            "bd": pl.Int64,
+            "registered_via": pl.Int64,
+            "registration_init_time": pl.Int64,
+        },
+    )
