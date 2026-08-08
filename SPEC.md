@@ -3,7 +3,9 @@
 > 本文件依《AI 應用就業養成班 機器學習實作專題手冊》PART 7 第一步撰寫。
 > **在此文件通過審核之前，不寫任何模型程式碼。**
 >
-> 版本 v0.2 · 建立於 2026-08-06 · 狀態：**待審**
+> 版本 v0.3 · 建立於 2026-08-06 · 最後更新 2026-08-08 · 狀態：**待審**
+>
+> **v0.3 更新**：`user_logs` 兩檔已下載並實測，§2.0 的「待測」全部回填（合計 **4.1 億列**）。**更正 §2.1 對 `members_v3` 覆蓋率的錯誤推論** —— 原文推斷「join 後不會有大量缺失」，實測 11.66% 查不到。新增 §2.1 末段「交易資料的兩項結構性現象」與對應的前處理要求。§2.3 斷言表增列第 12 條，並標註全部斷言已由 `tests/test_data_contract.py` 實作。§5.1 新增一條與 as-of 截斷有關的避雷提醒。
 >
 > **v0.2 更新**：資料已下載並實測，§2.1 所有「待驗證」數字已回填真實值。新增 §4.5 cohort 組成分析（實測發現的重大結構特性）。M1 驗收門檻改為實測基準 0.30746。
 
@@ -48,7 +50,9 @@ KKBOX 是訂閱制音樂串流平台。多數方案為 30 天，用戶每月面�
 
 ### 2.1 檔案清單與 schema
 
-以下 schema 由官方 Data 頁面確認。**除 `user_logs` 外，所有數字均為 2026-08-06 實機量測值**（資料位於 `D:/ml_data/raw/`）。`user_logs` 待 M2 下載後補。
+以下 schema 由官方 Data 頁面確認。**所有數字均為實機量測值**：主體於 2026-08-06 量測，`user_logs` 與本節末段的交易品質統計於 2026-08-08 補測（見附錄）。
+
+資料位置由 `configs/paths.yaml` 決定，**不硬編碼在程式裡** —— 主要電腦為 `D:/ml_data/`，其他機器可不同。該檔不進 Git，範本見 `configs/paths.example.yaml`。
 
 ### 2.0 檔案總覽（實測）
 
@@ -59,13 +63,17 @@ KKBOX 是訂閱制音樂串流平台。多數方案為 30 天，用戶每月面�
 | `transactions.csv` | 675 MB | **1.73 GB** | **21,547,746** | ✅ 已下載 |
 | `transactions_v2.csv` | 47 MB | 115 MB | **1,431,009** | ✅ 已下載 |
 | `members_v3.csv` | 231 MB | **428 MB** | **6,769,473** | ✅ 已下載 |
-| `user_logs.csv` | **6.6 GB** | ~30 GB | 待測 | ⬜ M2 再下 |
-| `user_logs_v2.csv` | 654 MB | ~3 GB | 待測 | ⬜ M2 再下 |
-| `sample_submission_v2.csv` | 29 MB | — | 待測 | ⬜ 提交時再下 |
-| `sample_submission_zero.csv` | 31 MB | — | 待測 | ⬜ 不需要 |
-| `WSDMChurnLabeller.scala` | 6.9 kB | — | — | ⬜ M3 選用 |
+| `user_logs.csv` | **6.6 GB** | **30.5 GB** | **392,106,543** | ✅ 已下載 |
+| `user_logs_v2.csv` | 654 MB | **1.43 GB** | **18,396,362** | ✅ 已下載 |
+| `sample_submission_v2.csv` | 29 MB | 42.7 MB | **907,471** | ✅ 已下載 |
+| `sample_submission_zero.csv` | 31 MB | 45.6 MB | **970,960** | ✅ 已下載 |
+| `WSDMChurnLabeller.scala` | 6.9 kB | — | — | ✅ 已下載（M3 選用）|
 
-競賽全部檔案合計約 **8.9 GB**（壓縮）。目前已下載約 1.0 GB，解壓後佔用約 2.4 GB。
+競賽全部檔案合計 **8,950,563,771 bytes**（壓縮，官方 API 實測），全部已下載，解壓後佔用約 **34.4 GB**。
+
+⚠️ **本表的單位慣例**：「壓縮」欄沿用 Kaggle 與檔案總管的顯示值，是 **二進位單位（GiB = 2³⁰）**；「解壓後」欄是 **十進位單位（GB = 10⁹）**。兩者相差 7.4%，例如 `transactions.csv` 在檔案總管顯示 1.61 GB、本表寫 1.73 GB，**是同一個檔案**（1.61 × 1.0737 = 1.73），不是下載不完整。下載完整性由 `scripts/download.py` 內嵌的 byte 數契約逐檔驗證。
+
+⚠️ **`user_logs` 合計 4.1 億列，是交易資料（2,298 萬列）的 17.9 倍。** 這個量級決定了 M2 只能用 Polars lazy / DuckDB streaming，見 §2.2。
 
 #### `train.csv` / `train_v2.csv` — 標籤
 
@@ -119,6 +127,49 @@ KKBOX 是訂閱制音樂串流平台。多數方案為 30 天，用戶每月面�
 
 📌 `payment_plan_days` 高度集中：30 天佔 85.1%（transactions_v2），其次為 410 / 195 / 180 / 90 天。`is_auto_renew = 1` 佔 78.5%。
 
+##### 交易資料的兩項結構性現象（v0.3 新增）
+
+以下兩項在全量 22,978,755 列上量測。**兩者都不是資料損壞**，但都會影響前處理與特徵定義，必須先分類清楚再決定怎麼處理。
+
+**現象一：`transaction_date > membership_expire_date` —— 158,766 列（0.69%）**
+
+| 統計 | 值 |
+|---|---|
+| 筆數 / 涉及用戶 | 158,766 / 138,503 |
+| **其中 `is_cancel = 1`** | **95.93%** |
+| 其中 `is_auto_renew = 1` | 98.96% |
+| 其中實付 0 元 | 9.30% |
+
+近 96% 是**取消紀錄**。合理解釋：用戶取消時，系統把 `membership_expire_date` 寫成生效的結束日（可能早於當下），而 `transaction_date` 記錄的是處理取消的日期。因此「交易日晚於到期日」對取消而言是正常的記錄慣例，不是錯誤。
+
+**對本專案的意義**：由於 `cutoff = membership_expire_date`，這些列在 as-of 過濾（`transaction_date <= cutoff`）中會被**正確排除**。這是對的 —— 2 月 16 日到期的用戶，2 月 20 日才處理的取消，在評分時點尚未發生，不該成為特徵。相關的洩漏風險見 §5.1 新增條目。
+
+**現象二：`actual_amount_paid = 0` —— 1,218,324 列（5.30%）**
+
+這**不是單一現象，是兩件語意不同的事被同一個條件混在一起**：
+
+| `plan_list_price` | `payment_plan_days` | 筆數 | 這是什麼 |
+|---|---|---|---|
+| **0** | 7 | 582,075 | 免費試用 |
+| **149** | 30 | 536,038 | 付費方案但零收款 |
+| 0 | 10 | 37,579 | 免費試用 |
+| 149 | 31 | 18,235 | 付費方案但零收款 |
+| 0 | **0** | 12,861 | ⚠️ 0 天方案，異常值 |
+
+- 定價本來就是 0 的佔 **53.97%** —— 免費方案收 0 元完全合理，不需處理
+- 其餘是**定價非 0 卻實付 0**，可能為促銷券、扣款失敗或退款。這一群的業務意義與免費試用完全不同
+
+**因此：判斷「這筆交易是不是沒收到錢」必須同時看 `plan_list_price`，不能只用 `actual_amount_paid == 0`。**
+
+**這不只是資料問題，更是強訊號。** Feb cohort 中最後一筆交易實付 0 元者：
+
+| 最後一筆實付 | 人數 | 佔比 | 流失率 |
+|---|---|---|---|
+| > 0 | 987,334 | 99.44% | 6.13% |
+| **= 0** | **5,597** | **0.56%** | **51.92%** |
+
+**差 8.5 倍。** 但注意規模：cohort 內僅 0.56% 的人最後一筆是 0 元，全量的 122 萬列多數散落在較早的歷史中，不落在 cutoff 那一筆上。
+
 #### `user_logs.csv` / `user_logs_v2.csv` — 每日收聽行為
 
 | 欄位 | 型別 | 說明 |
@@ -133,9 +184,18 @@ KKBOX 是訂閱制音樂串流平台。多數方案為 30 天，用戶每月面�
 | `num_unq` | int | 播放的不重複歌曲數 |
 | `total_secs` | float | 總播放秒數 |
 
-- `user_logs.csv` 涵蓋至 **2017-02-28**；`user_logs_v2.csv` 涵蓋至 **2017-03-31**
-- 官方說明其叢集上的 log 歷史為 **2015-01-01 ~ 2017-03-31**
-- 大小：解壓後 **超過 30 GB**（第三方回報，**待驗證**）— 本專案的記憶體天花板就在這裡
+| | `user_logs.csv` | `user_logs_v2.csv` |
+|---|---|---|
+| 筆數 | **392,106,543** | **18,396,362** |
+| `date` 範圍 | **2015-01-01 ~ 2017-02-28** | **2017-03-01 ~ 2017-03-31** |
+| 解壓後大小 | **30.5 GB** | **1.43 GB** |
+
+- 兩檔的日期範圍相接且不重疊，合併涵蓋 **2015-01-01 ~ 2017-03-31**，與官方說明一致
+- ✅ 第三方回報的「解壓後超過 30 GB」**已驗證為真**（實測 30.5 GB）— 本專案的記憶體天花板就在這裡
+- ⚠️ v0.2 估計 `user_logs_v2.csv` 解壓後約 3 GB，**實測 1.43 GB，高估一倍**
+- 📌 `user_logs_v2` 每天約 **59.3 萬名用戶**有收聽紀錄（18,396,362 ÷ 31 天），可用來估算 M2 聚合後的資料規模
+
+⚠️ **掃描快不代表聚合快。** 實測整份 `user_logs.csv`（30.5 GB）掃完僅 **26.7 秒**，但那是 Polars 的 projection pushdown 只解析了 `date` 一欄的結果。M2 的真實工作是讀全部 8 欄、對 4 億列做每人一組的 as-of 聚合，需要維護分組狀態，是完全不同的量級。不可以用掃描速度推估 M2 的可行性。
 
 #### `members_v3.csv` — 用戶屬性
 
@@ -155,21 +215,54 @@ KKBOX 是訂閱制音樂串流平台。多數方案為 30 天，用戶每月面�
 - ⚠️ **`bd`（年齡）範圍 -7168 ~ 2016，只有 32.83%（222 萬筆）落在合理的 10~100 歲區間**，其餘 455 萬筆是離群值。這個欄位的處理方式必須做對照實驗
 - ⚠️ **`gender` 缺失 65.43%**（442.9 萬筆）
 - `city` 21 種、`registered_via` 18 種 —— 兩者都是低基數類別，可直接 one-hot
-- members 涵蓋 677 萬用戶，遠多於任一 cohort 的 99 萬，join 後不會有大量缺失
 - 🚫 **禁用 `members.csv`**，理由見 §5 紅線 3
+
+##### ⚠️ 覆蓋率更正（v0.3）
+
+v0.2 原文寫「members 涵蓋 677 萬用戶，遠多於任一 cohort 的 99 萬，**join 後不會有大量缺失**」。**這個推論方向是錯的** —— 「members 有 677 萬人」不蘊含「cohort 那 99 萬人都在其中」，集合大小不決定包含關係。
+
+實測 Feb cohort：
+
+| | 人數 | 佔比 | 流失率 |
+|---|---|---|---|
+| 在 `members_v3` 中 | 877,161 | 88.34% | 6.57% |
+| **查不到** | **115,770** | **11.66%** | **5.02%** |
+| 全體 | 992,931 | 100% | 6.3923% |
+
+**兩個後果：**
+
+1. **那 11.66% 的 `city` / `bd` / `gender` / `registered_via` 全部是 null。** 前處理不得假設 join 完就有值。特別是不能用 `df.fillna(df.mean())` 這種全表補值 —— 除了違反紅線 5，也會把「這個人沒有屬性資料」這個事實抹掉。
+2. **「查不到」本身有訊號**（5.02% vs 整體 6.39%），應保留為一個布林特徵而非視為雜訊。`src/data/cohort.py` 產出的 `in_members` 欄位即為此用途，並刻意採 left join 而非 inner join，避免把這 11.6 萬人整批丟棄。
+
+本項已列為 §2.3 斷言 12，由 `tests/test_data_contract.py::test_members_coverage_of_feb_cohort` 守門。
 
 #### 其他
 
-- `sample_submission_zero.csv`（2017-03 到期）／`sample_submission_v2.csv`（2017-04 到期）— 測試集用戶清單
+- `sample_submission_zero.csv`（2017-03 到期）／`sample_submission_v2.csv`（2017-04 到期）— 測試集用戶清單。兩檔欄位皆為 `msno` + `is_churn`，後者在提交檔中為預測值。
+  - **實測 `sample_submission_zero.csv` = 970,960 列，與 `train_v2.csv` 完全相同。** 這證實它就是當年競賽的第一版測試集（Mar cohort），標籤公布後便成為 `train_v2.csv`。本專案不需要它。
+  - **實測 `sample_submission_v2.csv` = 907,471 列**，即 §4.2 所指的最終測試集（Apr cohort，標籤不可見）。注意它比 Mar cohort 的 970,960 人**少 6.5%**，代表 cohort 規模本身逐月變動，計算投放預算時不能假設每月人數相同。
 - `WSDMChurnLabeller.scala`（7.05 kB）— 官方標籤產生器，可用來自行建立更多歷史 cohort 的訓練標籤（M3 進階選項）
 
 ### 2.2 磁碟與記憶體預算
 
-| 資源 | 現況 | 判定 |
+| 資源 | 現況（主要電腦） | 判定 |
 |---|---|---|
-| RAM | 32 GB | `user_logs` 無法全量進記憶體 → **強制使用 Polars lazy / DuckDB streaming** |
+| RAM | 32 GB | `user_logs` **實測 4.1 億列 / 30.5 GB**，無法全量進記憶體 → **強制使用 Polars lazy / DuckDB streaming** |
 | GPU | GTX 1050 Ti 4 GB | 本專案全程不使用 |
-| 磁碟 | C: 201.8 GB · D: 427.3 GB 可用 | 充裕，**資料一律放 `D:/ml_data/`**，不放專案資料夾內 |
+| 磁碟 | C: 201.8 GB · D: 427.3 GB 可用 | 充裕。**資料一律放專案資料夾外**，主要電腦為 `D:/ml_data/` |
+
+**實測磁碟佔用**（全部 10 個檔案下載並解壓後）：
+
+| 目錄 | 內容 | 大小 |
+|---|---|---|
+| `archives/` | Kaggle 下載的 `.7z` | 8.95 GB |
+| `raw/` | 解壓後的 CSV | 34.4 GB |
+| `interim/` | as-of 特徵表 parquet 快取（Feb + Mar）| 84 MB |
+| | **合計** | **約 43.4 GB** |
+
+`interim/` 可隨時整個刪除重算，不算資產。兩個 cohort 各約 40 MB —— 99 萬列 × 20 欄壓成 40 MB，是 parquet 相對 CSV 的壓縮效果。
+
+⚠️ **資料根目錄是設定值，不是常數。** 上表的 `D:/ml_data/` 是主要電腦的路徑；實際位置由 `configs/paths.yaml` 的 `data_root` 決定，該檔不進 Git。所有程式一律經 `src/config.py` 取得路徑，因此換機器時 `src/`、`scripts/`、`notebooks/`、`tests/` 均不需修改。範本見 `configs/paths.example.yaml`。
 
 ### 2.3 資料契約斷言（M0 交付）
 
@@ -188,8 +281,24 @@ KKBOX 是訂閱制音樂串流平台。多數方案為 30 天，用戶每月面�
 | 9 | `members_v3` **不含** `expiration_date` 欄位 | 紅線 3 的守門測試 |
 | 10 | `train` × `train_v2` 的 `msno` 交集 | **881,701** |
 | 11 | 流失率 | Feb 6.3923% · Mar 8.9942% |
+| 12 | **`members_v3` 對 Feb cohort 的覆蓋率** | **查不到 115,770 人（11.66%）** |
 
 筆數容忍度設 **0 筆**——這是靜態的歷史資料集，數字變了就代表下載出錯或檔案被改動，不該容忍。
+
+**斷言 12 為 v0.3 新增**，用意是把「members 有大量缺失」這個事實鎖進測試，避免 §2.1 那條被更正的敘述再度回到文件裡。
+
+✅ **實作狀態**：以上 12 條全數實作於 `tests/test_data_contract.py`，另加兩項延伸斷言：
+
+- `user_logs.csv` / `user_logs_v2.csv` 的筆數（392,106,543 / 18,396,362）
+- 標籤欄位型別（`is_churn` 為整數、`msno` 為字串）
+
+驗證方式：
+
+```bash
+uv run pytest tests/test_data_contract.py -q
+```
+
+原始資料不在本機時，測試會 **skip 而非 fail** —— 剛 clone 完 repo 的人不應該看到滿螢幕紅字。
 
 ---
 
@@ -327,27 +436,49 @@ log loss @ 新進用戶子群 (9.19%)   ← 高風險、高不確定性
 
 三者的差距本身就是要寫進 README 的發現。只報總分會掩蓋模型在小分群上的失效。
 
+**實作**：`src/evaluation/metrics.py` 的 `segment_report()` 產生這張表，`repeat_vs_new()` 負責分群。以常數預測（M1 基準線）為例，實測輸出：
+
+| 分群 | 人數 | 佔比 | 實際流失率 | 平均預測機率 | log loss |
+|---|---|---|---|---|---|
+| 新進用戶 | 89,259 | 9.19% | 39.84% | 6.39% | **1.1353** |
+| 重複用戶 | 881,701 | 90.81% | 5.87% | 6.39% | **0.2237** |
+| 全體 | 970,960 | 100% | 8.99% | 6.39% | 0.3075 |
+
+**新進用戶的 log loss 是重複用戶的 5.1 倍**，而 headline 的 0.3075 完全看不出這件事。「實際流失率」與「平均預測機率」並列也是刻意的：39.84% 對 6.39% 一眼就能看出校準失效，等於 M4 reliability diagram 的簡易版。
+
+⚠️ **`repeat_vs_new()` 的結果只能用於評估切分，不得作為特徵**，理由見 §5.1 —— 測試集沒有上一期標籤檔可查。用於切報表是事後診斷，模型看不到；用於特徵則是部署時算不出來的東西。這條限制寫在該函式的 docstring 裡。
+
 ---
 
 ## 5. 🚫 紅線清單
 
 > 以下任何一條被違反，該版本作廢重做。每一條都要有對應的**會失敗的測試**（手冊 PART 7 第四步）。
 
-| # | 紅線 | 為什麼 | 對應測試 |
-|---|---|---|---|
-| 1 | 任何 `transaction_date > cutoff` 的交易**不得**進入特徵 | 到期日之後的交易**就是標籤**。這是本題的頭號洩漏 | `test_no_post_cutoff_transactions` |
-| 2 | 任何 `user_logs.date > cutoff` 的日誌**不得**進入特徵 | 到期後的收聽行為是結果，不是原因 | `test_no_post_cutoff_logs` |
-| 3 | **禁用 `members.csv`，只能用 `members_v3.csv`** | `members.csv` 的 `expiration_date` 是快照欄位，官方在 2017-11-13 特地發布 v3 就是為了**移除這個洩漏欄位** | `test_members_v3_only` |
-| 4 | 合併多 cohort 時必須 `GroupKFold(groups=msno)` | **實測 90.81% 的用戶跨兩期出現**，隨機切分會讓同一人同時在訓練與驗證集 | `test_groupkfold_when_cohorts_merged` |
-| 5 | 所有 imputation / scaling / encoding 統計量**必須在 fold 內計算** | 全表 `fillna(df.mean())` 會把驗證集資訊倒灌進訓練集。AI 產生的程式碼幾乎必犯 | `test_preprocessing_inside_pipeline` |
-| 6 | Target encoding 必須 out-of-fold | `payment_method_id` 是高基數類別，直接 target encode 會讓 CV 飆高、實測崩盤 | `test_target_encoding_is_oof` |
-| 7 | 不得使用 2017-04（測試觀察期）之後的任何資料 | 未來資訊 | `test_no_future_data` |
-| 8 | 本地評估必須套用官方的 `clip(1e-15, 1-1e-15)` | 否則本地分數與 LB 不可比 | `test_logloss_matches_official` |
+| # | 紅線 | 為什麼 | 對應測試（`tests/test_no_leakage.py`） | 狀態 |
+|---|---|---|---|---|
+| 1 | 任何 `transaction_date > cutoff` 的交易**不得**進入特徵 | 到期日之後的交易**就是標籤**。這是本題的頭號洩漏 | `test_red_line_1_guard_catches_violation` 等 4 項 | ✅ |
+| 2 | 任何 `user_logs.date > cutoff` 的日誌**不得**進入特徵 | 到期後的收聽行為是結果，不是原因 | `test_red_line_2_no_post_cutoff_logs` | ⏸ 等 M2 |
+| 3 | **禁用 `members.csv`，只能用 `members_v3.csv`** | `members.csv` 的 `expiration_date` 是快照欄位，官方在 2017-11-13 特地發布 v3 就是為了**移除這個洩漏欄位** | `test_red_line_3_no_code_reads_members_csv` 等 2 項 | ✅ |
+| 4 | 合併多 cohort 時必須 `GroupKFold(groups=msno)` | **實測 90.81% 的用戶跨兩期出現**，隨機切分會讓同一人同時在訓練與驗證集 | `test_red_line_4_groupkfold_when_cohorts_merged` | ⏸ 等 M3 |
+| 5 | 所有 imputation / scaling / encoding 統計量**必須在 fold 內計算** | 全表 `fillna(df.mean())` 會把驗證集資訊倒灌進訓練集。AI 產生的程式碼幾乎必犯 | `test_red_line_5_preprocessing_inside_pipeline` | ⏸ 等 M1 |
+| 6 | Target encoding 必須 out-of-fold | `payment_method_id` 是高基數類別，直接 target encode 會讓 CV 飆高、實測崩盤 | `test_red_line_6_target_encoding_is_oof` | ⏸ 等 M3 |
+| 7 | 不得使用 2017-04（測試觀察期）之後的任何資料 | 未來資訊 | `test_red_line_7_no_future_dates` 等 2 項 | ✅ |
+| 8 | 本地評估必須套用官方的 `clip(1e-15, 1-1e-15)` | 否則本地分數與 LB 不可比 | `test_red_line_8_clip_prevents_infinity` 等 3 項 | ✅ |
+
+**「會失敗的測試」是字面意思。** 證明「目前的資料通過檢查」證明不了任何事 —— 一個永遠回傳 `None` 的空函式也會通過。因此紅線 1 的守門邏輯被抽成 `src/data/cohort.py` 的 `assert_asof_respected()`，測試餵給它一張**確實違規**的表（某用戶的 `last_tx` 晚於自己的 `cutoff`），斷言它會 raise。邊界值 `last_tx == cutoff` 必須通過 —— 用戶在到期日當天交易是合法的，那筆資料在評分時點確實看得到。
+
+該守門函式**在 `build_cohort()` 中每次都會執行**，不是只在測試裡。洩漏一旦發生，寧可整支中斷，也不要靜靜產出一張錯的特徵表。
+
+⏸ 的四條依賴尚未存在的程式碼。**為不存在的東西寫測試只能寫出假的通過**，因此以 `@pytest.mark.skip(reason=...)` 保留在清單中，並於 `pyproject.toml` 設定 `addopts = "-ra"`，使每次 `pytest` 都重新列出這四條與各自的阻塞里程碑。測試套件因此同時是一份活的待辦清單。
+
+**紅線 8 的一個實作細節**：`clip` 的兩側並不對稱。`1 - 1e-15` 在 float64 中無法精確表示，最接近的 double 與 1 的距離約 9.992e-16 而非 1e-15，因此 `-ln(1-(1-eps)) ≈ 34.5396`，而低端是 `-ln(eps) ≈ 34.5388`。官方計分（sklearn）用相同的 clip、有相同的不對稱，故 `src/evaluation/metrics.py` **照抄而不「修正」**。改用 `log1p` 讓兩側對稱在數值上較佳，卻會使本地分數與 LB 產生系統性偏差 —— 正好違背本條紅線的目的。
 
 ### 5.1 避雷清單（非紅線，但幾乎每個人都會踩）
 
 - **`bd`（年齡）實測範圍 -7168 ~ 2016，只有 32.83% 落在 10~100 歲。** 直接當數值特徵會毀掉模型。處理方式（截斷／分箱／視為缺失）必須做對照實驗，並在 README 記錄選擇理由。同理 `gender` 缺失 65.43%，「缺失」本身可能就是一個有訊號的類別。
 - **`is_cancel` 不是流失。** 官方文件明示用戶可能因換方案而取消，實測全量僅 3.98% 帶此旗標。把它當標籤或當強特徵前，先確認它與 `is_churn` 的實際關係。
+- **⚠️ 算「歷史取消次數」時，聚合必須在 as-of 過濾之內。**（v0.3 新增）實測 158,766 列交易的 `transaction_date` 晚於自己的 `membership_expire_date`，其中 95.93% 是取消紀錄（見 §2.1）。對某位用戶跑 `is_cancel.sum()` 時若忘了先套 `transaction_date <= cutoff`，就會把「到期日之後才發生的取消」算進特徵——那是紅線 1 的直接違反，而且不會有任何錯誤訊息，只會讓 CV 分數莫名變好。`src/data/cohort.py` 的 `n_cancel_hist` 是在過濾**之內**聚合的，新增任何歷史統計量時比照辦理。
+- **判斷「沒收到錢」不能只看 `actual_amount_paid == 0`。**（v0.3 新增）實測 122 萬列實付 0 元，其中 53.97% 的 `plan_list_price` 本來就是 0（免費試用），與「定價 149 卻收 0 元」是兩件事。必須兩欄一起看，見 §2.1。
 - **只載入 `transactions_v2.csv` 等於沒有交易歷史。** 實測它 74.76% 是 2017-03 的交易，必須與 `transactions.csv`（2,154 萬列）合併使用。
 - **別讓「是否出現在上一期標籤檔」變成特徵。** 它在訓練集上威力驚人（見 §4.5 的 6.8 倍差距），但測試集沒有對應的上一期標籤檔，部署時算不出來。要用 as-of 的交易史長度來代理。
 - **不要一開始就跑全量。** 依手冊附錄 A 規則三，先做 `make smoke`（1% 抽樣）把整條 pipeline 跑通。`user_logs` 30 GB，最後一天才發現跑不完是歷年最常見的翻車原因。
@@ -393,13 +524,30 @@ E[淨收益] = p_churn × r_save × LTV_saved − C_offer
 
 | 階段 | 產出 | 驗收標準 |
 |---|---|---|
-| **M0** | Repo 骨架 + `scripts/download.py` + 資料契約測試 + CI | `make setup && make test` 綠燈；§2.3 的 11 項斷言全部通過 ✅ **資料已下載並實測完成** |
+| **M0** | Repo 骨架 + `scripts/download.py` + 資料契約測試 + CI | `make setup && make test` 綠燈；§2.3 的 12 項斷言全部通過 |
 | **M1** | `transactions` + `transactions_v2` + `members_v3` 的 LightGBM baseline | Mar cohort log loss **< 0.30746**；**依 §4.5 分三群回報**；回報 5-fold 標準差 |
-| **M2** | `user_logs` 聚合特徵模組（Polars lazy / DuckDB） | 30 GB 在 32 GB RAM 內完成聚合；近 7/14/30/90 天收聽行為、完播率、活躍天數、趨勢斜率；`make features` 可重複執行 |
+| **M2** | `user_logs` 聚合特徵模組（Polars lazy / DuckDB） | **4.1 億列 / 30.5 GB** 在 32 GB RAM 內完成聚合；近 7/14/30/90 天收聽行為、完播率、活躍天數、趨勢斜率；`make features` 可重複執行 |
 | **M3** | LGBM / XGB / CatBoost 三方比較 + null importance 特徵篩選 | 比較表 + 篩選前後對照；達 §3.3 門檻 |
 | **M4** | 機率校準 + 業務指標 | Reliability diagram、Brier、期望淨收益曲線、敏感度熱圖 |
 | **M5** | SHAP 解釋 + 流失原因碼生成 | 任一用戶可輸出 Top-3 流失原因（例：「近 30 天活躍天數由 22 降至 4」「未開啟自動續訂」「方案到期前 14 天零播放」） |
 | **M6** | FastAPI 服務 + PSI 漂移監控 + HF Spaces Demo | Docker 起服務，`/predict` 回傳機率與原因；含 `cutoff = expire_date − 7d` 版本的分數對照 |
+
+### 7.1 M0 完成度（2026-08-08）
+
+| 項目 | 狀態 |
+|---|---|
+| SPEC.md · README.md | ✅ |
+| 資料下載腳本 `scripts/download.py`（內嵌 byte 數契約、可重複執行） | ✅ |
+| 全部 10 個檔案下載並實測 | ✅ |
+| 環境：uv · Python 3.12 · editable 套件 · `configs/paths.yaml` 路徑設定 | ✅ |
+| `src/` 基礎模組：`config` · `data.cohort`（as-of 截斷）· `evaluation.metrics` | ✅ |
+| EDA `notebooks/eda_01_overview.py` + `reports/figures/` 8 張圖 | ✅ |
+| `tests/test_data_contract.py` —— §2.3 全 12 條斷言 | ✅ |
+| `tests/test_no_leakage.py` —— 紅線 1 / 3 / 7 / 8（另 4 條以 skip 保留，見 §5） | ✅ |
+| `Makefile` | ⬜ |
+| `.github/workflows/ci.yml` | ⬜ |
+
+目前測試狀態：**39 passed · 4 skipped**（skip 的 4 條為紅線 2 / 4 / 5 / 6，依賴尚未存在的程式碼，見 §5）。
 
 ---
 
@@ -459,4 +607,10 @@ E[淨收益] = p_churn × r_save × LTV_saved − C_offer
 | 新進用戶流失率 39.84% vs 重複用戶 5.87% | **本機實測** | ✅ 已量測，見 §4.5 |
 | M1 基準 log loss 0.30746 | **本機實測推算** | ✅ 已計算 |
 | `members_v3` 無 `expiration_date` 欄位 | **本機實測** | ✅ 已驗證，紅線 3 前提成立 |
-| `user_logs.csv.7z` = 6.6 GB（解壓約 30 GB） | Kaggle API 檔案清單 | ✅ 壓縮大小已確認，解壓後大小待 M2 |
+| `user_logs.csv` = 392,106,543 列 · 30.5 GB | **本機實測 2026-08-08** | ✅ v0.2 標「待測」，已回填 |
+| `user_logs_v2.csv` = 18,396,362 列 · 1.43 GB | **本機實測 2026-08-08** | ✅ v0.2 估 ~3 GB，高估一倍 |
+| 兩份 `user_logs` 日期範圍相接、涵蓋 2015-01-01 ~ 2017-03-31 | **本機實測 2026-08-08** | ✅ 與官方說明一致 |
+| `members_v3` 查不到 115,770 位 Feb cohort 用戶（11.66%） | **本機實測 2026-08-08** | ⚠️ **推翻 v0.2 的推論**，見 §2.1 |
+| 交易日晚於到期日 158,766 列，95.93% 為取消紀錄 | **本機實測 2026-08-08** | ✅ 官方文件未載明 |
+| 實付 0 元 1,218,324 列，53.97% 定價本為 0 | **本機實測 2026-08-08** | ✅ 官方文件未載明 |
+| 全部 10 個檔案合計 8,950,563,771 bytes（壓縮） | Kaggle API + 本機逐檔驗證 | ✅ 已下載並逐 byte 比對 |
