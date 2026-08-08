@@ -7,7 +7,7 @@
 #    效果完全相同 —— 本檔案只是那些指令的集中索引。安裝方式見 README。
 
 .DEFAULT_GOAL := help
-.PHONY: help setup data data-all lint format test test-fast test-ci eda features ablation train compare select encode tune reverse mlflow clean eval serve
+.PHONY: help setup data data-all lint format test test-fast test-ci eda features ablation train compare select encode tune reverse calibrate mlflow clean eval serve
 
 help:
 	@echo "可用目標："
@@ -33,6 +33,8 @@ help:
 	@echo "  encode     M3 target encoding 對照（紅線 6，約 1 分鐘）"
 	@echo "  tune       M3 LightGBM 隨機搜尋 31 組（約 15 分鐘）"
 	@echo "  reverse    反向時間外驗證 Mar→Feb，檢查比較結論的穩健性（約 12 分鐘）"
+	@echo ""
+	@echo "  calibrate  M4 校準診斷：reliability diagram + Brier/ECE（約 1 分鐘）"
 	@echo ""
 	@echo "  mlflow     開啟 MLflow UI 檢視實驗紀錄"
 	@echo "  clean      清除 __pycache__ / .pytest_cache / .ruff_cache"
@@ -114,6 +116,13 @@ tune:
 # 「三方比較的排名」是不是單月雜訊。
 reverse:
 	uv run python scripts/reverse_validation.py
+
+# --- M4 ---------------------------------------------------------------------
+
+# 校準診斷。**不 fit 任何校準器** —— 先看失準的形狀，再決定用 isotonic
+# 還是 Platt。產出 reports/figures/09、10 兩張圖。
+calibrate:
+	uv run python scripts/calibration_report.py
 
 mlflow:
 	uv run mlflow ui --backend-store-uri sqlite:///mlflow.db

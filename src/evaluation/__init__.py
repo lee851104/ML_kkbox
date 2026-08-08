@@ -5,6 +5,13 @@ SPEC §7 的結構表沒有列這一層（只列了 data / features / models / s
 產生」使用，放在 models/ 底下會讓報表程式看起來依賴模型層，實際上並沒有。
 """
 
+from src.evaluation.calibration import (
+    brier_score,
+    calibration_in_the_large,
+    expected_calibration_error,
+    max_calibration_error,
+    reliability_curve,
+)
 from src.evaluation.metrics import (
     EPS,
     constant_log_loss,
@@ -13,4 +20,15 @@ from src.evaluation.metrics import (
     segment_report,
 )
 
-__all__ = ["EPS", "constant_log_loss", "log_loss", "repeat_vs_new", "segment_report"]
+__all__ = [
+    "EPS",
+    "brier_score",
+    "calibration_in_the_large",
+    "constant_log_loss",
+    "expected_calibration_error",
+    "log_loss",
+    "max_calibration_error",
+    "reliability_curve",
+    "repeat_vs_new",
+    "segment_report",
+]
