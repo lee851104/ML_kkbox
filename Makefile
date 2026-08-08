@@ -7,7 +7,7 @@
 #    效果完全相同 —— 本檔案只是那些指令的集中索引。安裝方式見 README。
 
 .DEFAULT_GOAL := help
-.PHONY: help setup data data-all lint format test test-fast test-ci eda train mlflow clean features eval serve
+.PHONY: help setup data data-all lint format test test-fast test-ci eda features train mlflow clean eval serve
 
 help:
 	@echo "可用目標："
@@ -24,11 +24,12 @@ help:
 	@echo "  test-ci    只跑不需資料的純邏輯測試，要求零 skip"
 	@echo ""
 	@echo "  eda        產生 EDA 圖表到 reports/figures/"
-	@echo "  train      M1 LightGBM baseline（含 5-fold 標準差與 MLflow 追蹤）"
+	@echo "  features   M2 收聽行為聚合（首次約 30 秒，之後讀快取）"
+	@echo "  train      訓練並評估（含 5-fold 標準差與 MLflow 追蹤）"
 	@echo "  mlflow     開啟 MLflow UI 檢視實驗紀錄"
 	@echo "  clean      清除 __pycache__ / .pytest_cache / .ruff_cache"
 	@echo ""
-	@echo "  features / eval / serve   尚未實作，見各目標訊息"
+	@echo "  eval / serve   尚未實作，見各目標訊息"
 
 # --- 環境與資料 ------------------------------------------------------------
 
@@ -69,6 +70,10 @@ test-ci:
 eda:
 	uv run python notebooks/eda_01_overview.py
 
+# M2 收聽行為聚合。第一次要掃 31.9 GB 原始日誌（約 30 秒），之後讀快取。
+features:
+	uv run python scripts/features.py
+
 # M1 baseline。訓練 Feb cohort、在 Mar cohort 評估，未達 SPEC §3.3 的
 # 0.30746 門檻會回傳非零離開碼。
 train:
@@ -82,9 +87,6 @@ clean:
 
 # --- 尚未實作 --------------------------------------------------------------
 # 明確報錯而不是安靜地什麼都不做。一個成功但沒有產出的指令會讓人以為跑過了。
-
-features:
-	@echo "make features 尚未實作 —— M2（user_logs 聚合特徵）" && exit 1
 
 eval:
 	@echo "make eval 尚未實作 —— M3（模型比較與特徵篩選）" && exit 1

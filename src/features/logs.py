@@ -1,0 +1,291 @@
+"""user_logs 收聽行為聚合 —— M2 的核心。
+
+## 問題規模
+
+`user_logs` 兩檔合計 **410,502,905 列 / 31.9 GB**，是交易資料的 17.9 倍。
+本機 RAM 31.1 GB，全量進記憶體不可能（SPEC §2.2）。
+
+## 做法：先收斂，再聚合
+
+關鍵洞察是 **SPEC §7 要的最長窗口只有 90 天**。因此 2015 年到 2016 年上半
+的日誌完全用不到：
+
+    Feb cohort  cutoff 2017-02-01 ~ 02-28  →  只需要 2016-11-03 起
+    Mar cohort  cutoff 2017-03-01 ~ 03-31  →  只需要 2016-12-01 起
+    兩者聯集                                   2016-11-03 ~ 2017-03-31
+
+窗口外的列在掃描階段就被 predicate pushdown 丟掉，不會進到記憶體。收斂後
+的結果存成 parquet，之後調整特徵定義時只要讀那份小檔，不必重掃 31.9 GB。
+
+這是「先縮小再計算」的標準做法。反過來做 —— 先 join 再 filter —— 會需要
+把 4 億列的 join 中間結果放進記憶體，那才是會 OOM 的寫法。
+
+## as-of 截斷（紅線 2）
+
+每位用戶的窗口是**相對於他自己的 cutoff**，不是統一日期。實作方式是先算
+
+    days_before = cutoff − date
+
+然後只保留 `days_before >= 0` 的列。與紅線 1 相同，守門檢查抽成
+`assert_logs_within_cutoff()` 以便單獨測試。
+"""
+
+from __future__ import annotations
+
+from datetime import date, timedelta
+from pathlib import Path
+
+import polars as pl
+
+from src.config import Paths, load_paths
+from src.data import COHORTS, CohortSpec, build_cohort
+
+# SPEC §7 指定的觀察窗口。
+LOG_WINDOWS: tuple[int, ...] = (7, 14, 30, 90)
+MAX_WINDOW = max(LOG_WINDOWS)
+
+LOG_FILES = ("user_logs.csv", "user_logs_v2.csv")
+
+# 播放次數的五個分桶。num_100 是完播（超過 98.5%），完播率的分子。
+PLAY_COLUMNS = ("num_25", "num_50", "num_75", "num_985", "num_100")
+
+
+def _to_date(yyyymmdd: int) -> date:
+    s = str(yyyymmdd)
+    return date(int(s[:4]), int(s[4:6]), int(s[6:]))
+
+
+def _to_int(d: date) -> int:
+    return d.year * 10000 + d.month * 100 + d.day
+
+
+def window_bounds(specs: tuple[CohortSpec, ...]) -> tuple[int, int]:
+    """算出這些 cohort 合起來需要的日期範圍。
+
+    下界是最早的 cutoff 再往前推 MAX_WINDOW 天；上界是最晚的 cutoff。
+    範圍以外的日誌對任何特徵都沒有貢獻。
+    """
+    lo = min(_to_date(s.expire_start) for s in specs) - timedelta(days=MAX_WINDOW)
+    hi = max(s.expire_end for s in specs)
+    return _to_int(lo), hi
+
+
+def assert_logs_within_cutoff(df: pl.DataFrame) -> None:
+    """紅線 2 守門：不得有任何 `user_logs.date > cutoff` 的日誌進入特徵。
+
+    與紅線 1 的 `assert_asof_respected()` 同樣抽成獨立函式，理由也相同：
+    SPEC §5 要求每條紅線都要有「會失敗的測試」，而測試必須能餵給它確實
+    違規的輸入，確認它真的會 raise。
+
+    檢查的是 `log_min_days_before`（最近一筆日誌距離 cutoff 幾天）。負值代表
+    那筆日誌發生在到期日之後 —— 到期後的收聽行為是結果而不是原因，讓它進
+    特徵等於用未來預測過去。
+
+    Raises:
+        AssertionError: 存在 log_min_days_before < 0 的列。
+    """
+    col = "log_min_days_before"
+    if col not in df.columns:
+        raise KeyError(f"缺少檢查所需的欄位 {col!r}")
+
+    bad = df.filter(pl.col(col) < 0)
+    if bad.height:
+        worst = int(bad[col].min())
+        raise AssertionError(
+            f"紅線 2 違反：{bad.height:,} 位用戶的特徵含 cutoff 之後的日誌"
+            f"（最嚴重的晚了 {-worst} 天）。as-of 截斷失效，本表不可使用。"
+        )
+
+
+def narrow_logs(
+    paths: Paths | None = None,
+    specs: tuple[CohortSpec, ...] | None = None,
+    *,
+    force: bool = False,
+    verbose: bool = True,
+) -> Path:
+    """把 user_logs 收斂成只含需要的日期與用戶，寫成 parquet。
+
+    這一步是整個 M2 記憶體策略的關鍵，也是唯一需要碰 31.9 GB 原始檔的地方。
+    之後所有特徵計算都讀產出的 parquet。
+
+    Returns:
+        收斂後 parquet 的路徑。
+    """
+    paths = (paths or load_paths()).ensure()
+    specs = specs or tuple(COHORTS.values())
+
+    def log(msg: str = "") -> None:
+        if verbose:
+            print(msg, flush=True)
+
+    out = paths.interim / "user_logs_window.parquet"
+    if out.exists() and not force:
+        log(f"讀取既有的收斂檔 {out.name}")
+        return out
+
+    lo, hi = window_bounds(specs)
+    span = (_to_date(hi) - _to_date(lo)).days + 1
+    log(f"收斂 user_logs 至 {lo} ~ {hi}（{span} 天）...")
+
+    missing = [f for f in LOG_FILES if not (paths.raw / f).exists()]
+    if missing:
+        raise FileNotFoundError(
+            f"缺少 {', '.join(missing)}。請執行 uv run python scripts/download.py --groups logs"
+        )
+
+    # 用戶集合：只留兩個 cohort 會用到的人。
+    # user_logs 涵蓋的用戶遠多於任一 cohort，這一步能再砍掉一大塊。
+    wanted = (
+        pl.concat([pl.read_csv(paths.raw / s.label_file, columns=["msno"]) for s in specs])
+        .unique()
+        .lazy()
+    )
+    log(f"  目標用戶 {wanted.select(pl.len()).collect().item():,} 人")
+
+    logs = pl.concat([pl.scan_csv(paths.raw / f) for f in LOG_FILES])
+
+    # 用 semi-join 而不是 `is_in(msno_series)`：後者在 polars 新版會發出
+    # ambiguous 的 DeprecationWarning（同型別集合無法分辨是集合成員判斷還是
+    # 逐列比對），而 semi-join 語意明確，streaming 引擎也處理得比較好。
+    #
+    # 兩個 filter 都放在最前面，讓 predicate pushdown 在讀取階段就丟掉不要的
+    # 列 —— 記憶體裡永遠不會同時存在超過一個 batch。順序反過來（先 join 再
+    # filter）就得把 4 億列的中間結果放進記憶體，那才是會 OOM 的寫法。
+    (
+        logs.filter(pl.col("date").is_between(lo, hi))
+        .join(wanted, on="msno", how="semi")
+        .sink_parquet(out)
+    )
+
+    size_gb = out.stat().st_size / 1024**3
+    log(f"  完成 → {out.name}（{size_gb:.2f} GiB）")
+    return out
+
+
+def _window_aggs(w: int) -> list[pl.Expr]:
+    """單一窗口的聚合式。"""
+    inside = pl.col("days_before") < w
+    return [
+        # 有紀錄的天數。注意這不等於 w —— 沒打開 App 的日子不會有列。
+        inside.sum().alias(f"log{w}_active_days"),
+        pl.col("total_secs").filter(inside).sum().alias(f"log{w}_secs"),
+        pl.col("plays").filter(inside).sum().alias(f"log{w}_plays"),
+        pl.col("num_100").filter(inside).sum().alias(f"log{w}_completed"),
+        pl.col("num_unq").filter(inside).sum().alias(f"log{w}_unq"),
+    ]
+
+
+def _derived(w: int) -> list[pl.Expr]:
+    """由聚合值算出的比率。除法一律擋分母為 0。"""
+    plays = pl.col(f"log{w}_plays")
+    active = pl.col(f"log{w}_active_days")
+    secs = pl.col(f"log{w}_secs")
+    return [
+        # 完播率：播完的歌佔所有播放的比例。掐掉不聽是流失的前兆。
+        pl.when(plays > 0)
+        .then(pl.col(f"log{w}_completed") / plays)
+        .otherwise(None)
+        .alias(f"log{w}_completion"),
+        # 活躍密度：這 w 天裡有幾成的日子有打開。
+        (active / w).alias(f"log{w}_active_ratio"),
+        # 有聽的那幾天平均聽多久。與 active_ratio 分開，因為「每天聽一點」
+        # 和「偶爾聽很久」是不同的行為模式。
+        pl.when(active > 0)
+        .then(secs / active)
+        .otherwise(None)
+        .alias(f"log{w}_secs_per_active_day"),
+    ]
+
+
+def build_log_features(
+    spec: CohortSpec | str,
+    paths: Paths | None = None,
+    *,
+    force: bool = False,
+    verbose: bool = True,
+) -> pl.DataFrame:
+    """算出某個 cohort 每人一列的收聽行為特徵。
+
+    Args:
+        spec:  CohortSpec 或 "feb" / "mar"。
+        force: True 則忽略快取重算。
+
+    Returns:
+        每位用戶一列。含 msno 與所有 log 特徵。**只包含在窗口內有紀錄的
+        用戶** —— 沒有紀錄的人不會出現，由呼叫端以 left join 處理。
+
+    Raises:
+        AssertionError: 產出的特徵含 cutoff 之後的日誌（紅線 2 破功）。
+    """
+    if isinstance(spec, str):
+        spec = COHORTS[spec]
+    paths = (paths or load_paths()).ensure()
+
+    def log(msg: str = "") -> None:
+        if verbose:
+            print(msg, flush=True)
+
+    cache = paths.interim / f"{spec.name}_log_features.parquet"
+    if cache.exists() and not force:
+        cached = pl.read_parquet(cache)
+        log(f"讀取快取 {cache.name}（{cached.height:,} 列）")
+        return cached
+
+    narrowed = narrow_logs(paths, verbose=verbose)
+
+    # 每位用戶的 cutoff。從 cohort 表拿而不是自己重算，確保收聽特徵與交易
+    # 特徵用的是**同一個** cutoff —— 兩處各自推導遲早會分歧。
+    cutoffs = build_cohort(spec, paths, verbose=False).select("msno", "cutoff")
+    log(f"建立 {spec.name} 收聽特徵（{cutoffs.height:,} 位用戶）...")
+
+    date_col = pl.col("date").cast(pl.Int64).cast(pl.String).str.to_date("%Y%m%d")
+    cutoff_col = pl.col("cutoff").cast(pl.Int64).cast(pl.String).str.to_date("%Y%m%d")
+
+    per_user = (
+        pl.scan_parquet(narrowed)
+        .join(cutoffs.lazy(), on="msno", how="inner")
+        .with_columns((cutoff_col - date_col).dt.total_days().alias("days_before"))
+        # ---- 這一行就是紅線 2 ----
+        # 只保留 cutoff 當天與之前的日誌。到期後的收聽行為是結果不是原因。
+        .filter(pl.col("days_before") >= 0)
+        .filter(pl.col("days_before") < MAX_WINDOW)
+        .with_columns(pl.sum_horizontal(PLAY_COLUMNS).alias("plays"))
+        .group_by("msno")
+        .agg(
+            pl.col("days_before").min().alias("log_min_days_before"),
+            pl.col("days_before").max().alias("log_max_days_before"),
+            *[e for w in LOG_WINDOWS for e in _window_aggs(w)],
+        )
+        .collect(engine="streaming")
+    )
+
+    out = per_user.with_columns(
+        *[e for w in LOG_WINDOWS for e in _derived(w)],
+        pl.lit(1.0).alias("log_has_logs"),
+    )
+
+    # 趨勢：短窗口的日均對長窗口的日均。
+    # 比值而非迴歸斜率，因為比值不受單位影響、也不受離群日拖動，而且能直接
+    # 讀成一句話：「最近一週的聽歌時間是最近一個月平均的幾倍」。
+    # 0.2 代表活躍度掉到五分之一，那是很強的流失前兆。
+    out = out.with_columns(
+        _ratio("log7_secs", 7, "log30_secs", 30, "log_trend_7_30"),
+        _ratio("log30_secs", 30, "log90_secs", 90, "log_trend_30_90"),
+        _ratio("log7_active_days", 7, "log30_active_days", 30, "log_trend_active_7_30"),
+    )
+
+    assert_logs_within_cutoff(out)
+
+    out.write_parquet(cache)
+    covered = out.height / cutoffs.height
+    log(f"  完成 {out.height:,} 列 × {out.width} 欄（覆蓋 {covered:.2%} 的 cohort 用戶）")
+    log(f"  已快取 → {cache.name}")
+    return out
+
+
+def _ratio(num: str, num_days: int, den: str, den_days: int, alias: str) -> pl.Expr:
+    """短窗口日均 ÷ 長窗口日均。分母為 0 時回 null。"""
+    per_day_num = pl.col(num) / num_days
+    per_day_den = pl.col(den) / den_days
+    return pl.when(per_day_den > 0).then(per_day_num / per_day_den).otherwise(None).alias(alias)

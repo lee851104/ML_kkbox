@@ -23,7 +23,7 @@ import pytest
 from src.config import REPO_ROOT
 from src.data import assert_asof_respected
 from src.evaluation import EPS, constant_log_loss, log_loss
-from src.features import build_features
+from src.features import assert_logs_within_cutoff, build_features
 from tests.conftest import NODATA, SLOW, make_synthetic_cohort
 
 # 測試觀察期的上界。SPEC 紅線 7：不得使用 2017-04 之後的任何資料。
@@ -240,13 +240,50 @@ def test_m1_baseline_threshold(feb_cohort, mar_cohort):
 # 這四條 skip 與原因，提醒還欠什麼。用 `uv run pytest -ra` 可以看到。
 
 
-@pytest.mark.skip(reason="紅線 2：等 M2 —— user_logs 聚合特徵還不存在")
-def test_red_line_2_no_post_cutoff_logs():
-    """任何 user_logs.date > cutoff 的日誌不得進入特徵。
+@NODATA
+def test_red_line_2_guard_catches_post_cutoff_logs():
+    """守門函式必須擋下含 cutoff 之後日誌的特徵表。
 
-    M2 建 src/features/ 的收聽行為聚合時實作。屆時的寫法應與紅線 1 相同：
-    把截斷檢查抽成守門函式，餵違規資料確認會 raise。
+    與紅線 1 同樣的測法：餵一張 u1 的最近日誌晚於自己 cutoff 的表，
+    確認 assert_logs_within_cutoff 會 raise。
+
+    `log_min_days_before` 是「最近一筆日誌距離 cutoff 幾天」，負值代表那筆
+    日誌發生在到期日之後 —— 到期後的收聽行為是結果不是原因，讓它進特徵
+    等於用未來預測過去。
     """
+    bad = pl.DataFrame({"msno": ["u0", "u1"], "log_min_days_before": [0, -3]})
+    with pytest.raises(AssertionError, match="紅線 2 違反"):
+        assert_logs_within_cutoff(bad)
+
+
+@NODATA
+def test_red_line_2_guard_accepts_same_day_logs():
+    """cutoff 當天的日誌必須通過（邊界值 0）。
+
+    用戶在到期日當天聽歌是合法的，那筆資料在評分時點確實看得到。
+    實測 Feb cohort 的 log_min_days_before 中位數就是 0 —— 多數人到期
+    當天仍在使用，把 0 擋掉會誤殺一半以上的資料。
+    """
+    good = pl.DataFrame({"msno": ["u0", "u1"], "log_min_days_before": [0, 45]})
+    assert_logs_within_cutoff(good)
+
+
+@NODATA
+def test_red_line_2_guard_rejects_missing_column():
+    """缺欄位要明確報錯，不能默默視為通過。"""
+    with pytest.raises(KeyError):
+        assert_logs_within_cutoff(pl.DataFrame({"msno": ["u0"]}))
+
+
+@SLOW
+@pytest.mark.parametrize("cohort_name", ["feb", "mar"])
+def test_red_line_2_real_log_features_are_clean(paths, cohort_name: str):
+    """實際產出的兩個 cohort 收聽特徵表都必須通過守門。"""
+    from src.features import build_log_features
+
+    if not (paths.raw / "user_logs.csv").exists():
+        pytest.skip("user_logs.csv 不存在，請執行 download.py --groups logs")
+    assert_logs_within_cutoff(build_log_features(cohort_name, paths, verbose=False))
 
 
 @pytest.mark.skip(reason="紅線 4：等 M3 —— 還沒有合併多 cohort 的程式碼")

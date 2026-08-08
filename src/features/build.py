@@ -102,11 +102,14 @@ def _days_before_cutoff(col: str, alias: str) -> pl.Expr:
     return pl.when(days >= 0).then(days).otherwise(None).alias(alias)
 
 
-def build_features(df: pl.DataFrame) -> FeatureSet:
+def build_features(df: pl.DataFrame, logs: pl.DataFrame | None = None) -> FeatureSet:
     """把 `src.data.build_cohort()` 的輸出轉成特徵矩陣。
 
     Args:
-        df: build_cohort 產生的 as-of 表，欄位見 `src.data.cohort.EXPECTED_COLUMNS`。
+        df:   build_cohort 產生的 as-of 表，欄位見 `src.data.cohort.EXPECTED_COLUMNS`。
+        logs: `src.features.build_log_features()` 的輸出（M2）。給了就以 left join
+              併入。**必須是 left join** —— 實測 18.4% 的 cohort 用戶在 90 天窗口
+              內沒有任何收聽紀錄，inner join 會把他們整批丟掉。
 
     Returns:
         FeatureSet。X 不含 `msno` 與任何原始日期欄位。
@@ -191,4 +194,36 @@ def build_features(df: pl.DataFrame) -> FeatureSet:
         .alias("gender_code"),
     )
 
+    if logs is not None:
+        X = _attach_logs(df["msno"], X, logs)
+
     return FeatureSet(X=X, y=df["is_churn"], msno=df["msno"])
+
+
+def _attach_logs(msno: pl.Series, X: pl.DataFrame, logs: pl.DataFrame) -> pl.DataFrame:
+    """把收聽特徵 left join 到交易特徵上。
+
+    沒有收聽紀錄的用戶：`log_has_logs` 填 0，其餘 log 欄位保持 null 讓
+    LightGBM 走缺失分支。**不補 0** —— 「沒有紀錄」和「聽了 0 秒」是不同的
+    兩件事，補 0 會把前者偽裝成後者。
+
+    實測「完全沒有紀錄」這件事本身**幾乎沒有訊號**（Feb 6.12% vs 6.45%，
+    Mar 方向甚至相反），推測是自動續訂的休眠訂戶：不聽但錢照扣，所以不流失。
+    保留 `log_has_logs` 讓模型自己決定要不要用。
+
+    這一步仍然是無狀態的：每位用戶的 log 特徵只由他自己的日誌決定，與批次
+    裡有哪些人無關，所以紅線 5 的無狀態測試依然成立。
+    """
+    if "msno" not in logs.columns:
+        raise KeyError("收聽特徵表缺少 msno 欄位，無法 join")
+
+    joined = (
+        pl.DataFrame({"msno": msno})
+        .join(logs, on="msno", how="left")
+        .with_columns(pl.col("log_has_logs").fill_null(0.0))
+        .drop("msno")
+    )
+    if joined.height != X.height:
+        raise ValueError(f"join 後列數改變（{X.height} → {joined.height}），收聽特徵有重複的 msno")
+
+    return pl.concat([X, joined], how="horizontal")

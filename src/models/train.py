@@ -42,7 +42,7 @@ from sklearn.model_selection import StratifiedKFold, train_test_split
 from src.config import REPO_ROOT, Paths, load_paths
 from src.data import FEB, MAR, build_cohort
 from src.evaluation import constant_log_loss, log_loss, repeat_vs_new, segment_report
-from src.features import FeatureSet, build_features
+from src.features import FeatureSet, build_features, build_log_features
 
 DEFAULT_CONFIG = REPO_ROOT / "configs" / "model_lgbm.yaml"
 
@@ -140,11 +140,22 @@ def train_baseline(
             print(msg, flush=True)
 
     # ---- 資料 ----
-    log("載入 cohort...")
+    use_logs = cfg.get("features", {}).get("use_logs", False)
+    log(f"載入 cohort（收聽特徵：{'啟用' if use_logs else '停用'}）...")
     feb_raw = build_cohort(FEB, paths, verbose=False)
     mar_raw = build_cohort(MAR, paths, verbose=False)
-    feb = build_features(feb_raw)
-    mar = build_features(mar_raw)
+
+    feb_logs = mar_logs = None
+    if use_logs:
+        feb_logs = build_log_features(FEB, paths, verbose=False)
+        mar_logs = build_log_features(MAR, paths, verbose=False)
+        log(
+            f"  收聽特徵覆蓋 Feb {feb_logs.height / feb_raw.height:.2%}"
+            f" · Mar {mar_logs.height / mar_raw.height:.2%}"
+        )
+
+    feb = build_features(feb_raw, feb_logs)
+    mar = build_features(mar_raw, mar_logs)
     log(f"  訓練 Feb {feb.X.height:,} 列 × {feb.X.width} 特徵，流失率 {feb.y.mean():.4%}")
     log(f"  驗證 Mar {mar.X.height:,} 列 × {mar.X.width} 特徵，流失率 {mar.y.mean():.4%}")
 
@@ -296,7 +307,11 @@ def log_to_mlflow(
         mlflow.create_experiment(exp_name, artifact_location=artifact_dir.as_uri())
     mlflow.set_experiment(exp_name)
 
-    with mlflow.start_run(run_name=tracking.get("run_name")) as run:
+    use_logs = cfg.get("features", {}).get("use_logs", False)
+    run_name = tracking.get("run_name") or ("m2_with_logs" if use_logs else "m1_transactions_only")
+
+    with mlflow.start_run(run_name=run_name) as run:
+        mlflow.log_param("features.use_logs", use_logs)
         mlflow.log_params({f"lgb.{k}": v for k, v in cfg["model"].items()})
         mlflow.log_params({f"train.{k}": v for k, v in cfg["training"].items()})
         mlflow.log_param("best_iteration", result.best_iteration)

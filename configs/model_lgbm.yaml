@@ -7,6 +7,11 @@
 # 這組是**未調參的合理起點**，不是最佳解。調參是 M3 的工作 ——
 # M1 的目的只是確認整條 pipeline 通、並取得一個誠實的基準分數。
 
+# 特徵集開關。M1 與 M2 的差異只有這一行 —— 其他設定全部不動，
+# 這樣分數的變化才能歸因於「加了收聽行為特徵」而不是別的原因（§10 Q3）。
+features:
+  use_logs: true
+
 model:
   objective: binary
   metric: binary_logloss
@@ -80,4 +85,6 @@ tracking:
   backend: sqlite:///mlflow.db
   artifact_dir: mlartifacts
   experiment: kkbox-churn
-  run_name: m1_lgbm_baseline
+  # 留空則依 features.use_logs 自動命名為 m1_transactions_only / m2_with_logs，
+  # 這樣 MLflow 上的 run 一眼就看得出是哪個特徵集。
+  run_name: null

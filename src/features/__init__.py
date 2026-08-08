@@ -8,5 +8,21 @@ from src.features.build import (
     FeatureSet,
     build_features,
 )
+from src.features.logs import (
+    LOG_WINDOWS,
+    assert_logs_within_cutoff,
+    build_log_features,
+    narrow_logs,
+    window_bounds,
+)
 
-__all__ = ["CATEGORICAL", "FeatureSet", "build_features"]
+__all__ = [
+    "CATEGORICAL",
+    "LOG_WINDOWS",
+    "FeatureSet",
+    "assert_logs_within_cutoff",
+    "build_features",
+    "build_log_features",
+    "narrow_logs",
+    "window_bounds",
+]
