@@ -6,6 +6,7 @@
 from src.features.build import (
     CATEGORICAL,
     FeatureSet,
+    assert_logs_match_cohort,
     build_features,
 )
 from src.features.encoding import (
@@ -19,6 +20,7 @@ from src.features.logs import (
     LOG_WINDOWS,
     assert_logs_within_cutoff,
     build_log_features,
+    expected_log_columns,
     log_feature_group,
     narrow_logs,
     window_bounds,
@@ -31,9 +33,11 @@ __all__ = [
     "FeatureSet",
     "TargetEncoder",
     "assert_encoding_is_oof",
+    "assert_logs_match_cohort",
     "assert_logs_within_cutoff",
     "build_features",
     "build_log_features",
+    "expected_log_columns",
     "fit_target_encoder",
     "log_feature_group",
     "narrow_logs",

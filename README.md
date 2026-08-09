@@ -15,8 +15,8 @@
 > EDA 與 8 張圖表、M1 baseline、M2 收聽特徵聚合、M3 四個實驗、
 > 一次獨立洩漏審查（7 個問題全數修正）、
 > 一次反向時間外驗證、一次列順序不決定性的修正（兩者都改變過 M3 的結論）、
-> M4 校準診斷、
-> 測試 **95 passed · 1 skipped**（僅紅線 4 待 M6）、Makefile、GitHub Actions CI。
+> M4 校準診斷、**兩次獨立洩漏審查（7 + 6 個問題全數修正）**、
+> 測試 **101 passed · 1 skipped**（僅紅線 4 待 M6）、Makefile、GitHub Actions CI。
 >
 > **表中 M0–M3 的分數全部為實測值**，每一個都可用對應的 `make` 指令重現。
 > M4／M6 尚未產生，標為 ⬜。
@@ -525,6 +525,53 @@ tx.filter(membership_expire_date 落在到期區間)
 
 ---
 
+## 第二次洩漏審查：守門擋不擋得住？
+
+第一次審查（見下方）修掉七個**已經發生**的洩漏。第二次問的是不同的問題：**守門擋得住嗎？**
+
+作法是對每個發現的缺口先寫一條**會失敗的測試**，再修到它變綠（[tests/test_leakage_audit.py](tests/test_leakage_audit.py)）。
+
+### 共同成因：兩條紅線都只檢查內部一致性
+
+| 守門 | 檢查什麼 | **不**檢查什麼 |
+|---|---|---|
+| 紅線 1 | 最後一筆交易不晚於 cutoff | **cutoff 本身對不對** |
+| 紅線 2 | 最近一筆日誌不晚於 cutoff | **這份日誌是不是別的 cohort 算的** |
+
+三個快取都只驗證形狀，沒有一個記錄自己是用什麼參數算的。**一份用錯參數的快取可以通過所有守門，而且分數會變好，所以不會有人起疑。**
+
+### 最嚴重的一條：71.89% 的用戶會被影響
+
+把 Mar 的收聽特徵接到 Feb 的 cohort 上：
+
+```
+可 join 上 713,835 人（71.89%）
+build_features(Feb cohort, Mar 收聽特徵) → 沒有拋出任何例外
+交集用戶的 Mar cutoff 比 Feb cutoff 晚：中位數 28 天
+```
+
+紅線 2 必然放行——它檢查的是 `log_min_days_before >= 0`，而那是相對於**日誌自己那個** cutoff。
+
+修法：收聽特徵輸出帶 `cutoff` 欄（**出身證明，不是特徵**，驗證完就 drop），逐人比對。修正後同一個呼叫擋下全部 713,835 位不符。
+
+### 一個順序上的教訓
+
+第一版把 schema 檢查放在紅線 2 之前，結果**一份含洩漏的快取會被「反正要重算」默默蓋過去**。已改成先驗洩漏（raise）、再驗過時（重算）——把兩者混在同一個分支，等於讓嚴重的錯誤被例行處置吸收掉。
+
+### 唯一修不掉的一條
+
+`members_v3.csv` 是 2017-11-13 的快照，不是 as-of cutoff 的狀態。用戶若在 2017 年中搬家，Feb cohort 會拿到 cutoff 之後才成立的城市。
+
+**資料集沒有提供屬性的歷史版本，無法修復。** 能做的是量化並記錄——實測暴露面 **0.93% 的 gain**（`city` 0.365% + `registered_via` 0.255% + `bd` 0.253% + 其餘 0.05%），且這是上界。`registration_init_time` 不受影響，註冊日不會事後變動。
+
+時點已宣告為 `MEMBERS_SNAPSHOT_DATE`，數字會進 M6 的 MODEL_CARD。
+
+### 六條修正沒有改變任何分數
+
+特徵數仍是 61、M2 仍是 0.15821——**逐位元相同**。這是刻意的驗收條件：一個「加了檢查卻改變分數」的修正，代表它動到了計算，那必須先解釋為什麼。
+
+---
+
 ## 一個 bug 讓所有分數都不可重現
 
 測試「換過方案」這個特徵時（見 [SPEC.md §7.8](SPEC.md)），發現 `build_cohort` 的**輸出列順序每次重建都不同**——polars 的 `group_by` 不保證順序。而下游的 `train_test_split` 是**依位置**切分的：順序一變，train / early-stopping 就換一批人。
@@ -613,7 +660,7 @@ make data-all
 make test
 ```
 
-應為 **95 passed · 1 skipped**，約 40 秒（唯一 skip 的是紅線 4，阻塞里程碑為 M6）。資料尚未下載時測試會 skip 而非 fail —— 剛 clone 完 repo 的人不該看到滿螢幕紅字。
+應為 **101 passed · 1 skipped**，約 40 秒（唯一 skip 的是紅線 4，阻塞里程碑為 M6）。資料尚未下載時測試會 skip 而非 fail —— 剛 clone 完 repo 的人不該看到滿螢幕紅字。
 
 `make test-fast` 跳過需掃大檔的測試；`make lint` 跑 ruff 檢查。沒有 make 時對應 `uv run pytest`、`uv run pytest -m "not slow"`、`uv run ruff check .`。
 
@@ -692,7 +739,8 @@ ML_kkbox/
 │   ├── ✅ test_data_contract.py  # SPEC §2.3 的 12 條斷言
 │   ├── ✅ test_features.py       # 特徵層的純邏輯測試
 │   ├── ✅ test_selection.py      # M3 的純邏輯測試
-│   ├── ✅ test_leakage_regressions.py # 獨立洩漏審查的 7 條迴歸測試
+│   ├── ✅ test_leakage_regressions.py # 第一次洩漏審查的 7 條迴歸測試
+│   ├── ✅ test_leakage_audit.py       # 第二次洩漏審查的 6 條守門測試
 │   ├── ✅ test_reverse_validation.py  # 穩健性判定邏輯（σ 門檻）
 │   └── ✅ test_no_leakage.py     # 紅線 1/2/3/5/6/7/8 已實作，僅 4 以 skip 保留（等 M6）
 ├── ✅ notebooks/
@@ -707,7 +755,7 @@ ML_kkbox/
 
 ## CI 驗證了什麼（以及沒驗證什麼）
 
-**CI runner 上沒有原始資料** —— 資料依競賽規則不進 Git。因此 96 條測試裡有 35 條在 CI 上會被跳過。
+**CI runner 上沒有原始資料** —— 資料依競賽規則不進 Git。因此 102 條測試裡有 35 條在 CI 上會被跳過。
 
 ⚠️ **一個全部 skip 的測試套件也會顯示綠燈。** 這跟本專案 [SPEC.md §4.5](SPEC.md) 講的「總分會騙人」是同一類問題：一個看起來成功的數字，底下什麼都沒驗證。
 

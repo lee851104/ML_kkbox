@@ -56,6 +56,34 @@ MISSING_CATEGORY = -1
 # 幾乎沒有差異 —— 「有沒有填」比「填什麼」有訊號得多。
 GENDER_CODES = {"male": 0, "female": 1}
 
+# `members_v3.csv` 這份快照的時點。
+#
+# ⚠️ **這是本專案唯一一個已知、且無法從資料修復的洩漏。**
+#
+# 官方於 2017-11-13 發布 v3（目的是移除 members.csv 的 `expiration_date`
+# 洩漏欄位，見紅線 3）。但整份檔案是**該時點的快照**，不是 as-of 各 cohort
+# cutoff 的狀態。一位用戶若在 2017 年年中搬家或更新資料，Feb cohort 的特徵
+# 會拿到 cutoff 之後才成立的值。
+#
+# 受影響的欄位與實測 gain 佔比（M2 模型，61 特徵）：
+#
+#     city            0.365%
+#     registered_via  0.255%
+#     bd              0.253%（bd_clean + bd_valid）
+#     in_members      0.028%
+#     gender          0.024%
+#     ─────────────────────
+#     合計            0.93%
+#
+# `registration_init_time`（0.43%）**不受影響** —— 註冊日不會事後變動。
+#
+# 為什麼修不掉：資料集沒有提供屬性的歷史版本，無從還原 cutoff 當下的值。
+# 0.93% 是上界且很可能高估甚多（多數人的城市與性別本來就不會變）。
+#
+# 這個常數存在的目的是**讓時點被記錄下來**：一份沒有標註時點的快照，讀者
+# 無從判斷屬性有多舊，也就無法評估風險。M6 的 MODEL_CARD 需要這個數字。
+MEMBERS_SNAPSHOT_DATE = 20171113
+
 # bd（年齡）的合理範圍。官方明示此欄含 -7168 ~ 2016 的離群值，
 # cohort 內只有 39.18% 落在此區間（SPEC §5.1 要求做對照實驗，M3 處理）。
 BD_MIN, BD_MAX = 10, 100
@@ -270,12 +298,55 @@ def build_features(df: pl.DataFrame, logs: pl.DataFrame | None = None) -> Featur
     )
 
     if logs is not None:
-        X = _attach_logs(df["msno"], X, logs)
+        X = _attach_logs(df["msno"], df["cutoff"], X, logs)
 
     return FeatureSet(X=X, y=df["is_churn"], msno=df["msno"])
 
 
-def _attach_logs(msno: pl.Series, X: pl.DataFrame, logs: pl.DataFrame) -> pl.DataFrame:
+def assert_logs_match_cohort(msno: pl.Series, cutoff: pl.Series, logs: pl.DataFrame) -> None:
+    """守門：這份收聽特徵必須是用**同一批 cutoff** 算出來的。
+
+    **這條檢查補的是紅線 2 的盲點。**
+
+    `assert_logs_within_cutoff()` 檢查 `log_min_days_before >= 0` —— 但那是
+    相對於**日誌自己那個** cutoff。一份用 Mar cutoff 算出來的收聽特徵，它的
+    `log_min_days_before` 當然全部非負，所以紅線 2 必然放行。
+
+    實測把 Mar 的收聽特徵接到 Feb 的 cohort 上：**71.89% 的用戶 join 得上**
+    （兩期用戶重疊 90.81%），而那些人的 Mar cutoff 中位數比 Feb cutoff 晚
+    **28 天**。於是「二月到期的用戶」的特徵含了到期後 28 天的收聽行為 ——
+    而 Feb 的標籤正是由那段時間決定的。整個過程沒有任何一行程式碼會抱怨。
+
+    因此 `build_log_features()` 在輸出裡帶了 `cutoff` 欄，這裡逐一比對。
+
+    Raises:
+        KeyError:       收聽特徵表沒有 `cutoff` 欄（舊版快取或手工組的表）。
+        AssertionError: 有任何一位用戶的 cutoff 對不上。
+    """
+    if "cutoff" not in logs.columns:
+        raise KeyError(
+            "收聽特徵表缺少 cutoff 欄，無法驗證它屬於哪個 cohort。"
+            "請以現行版本的 build_log_features() 重新產生（force=True）。"
+        )
+
+    ref = pl.DataFrame({"msno": msno, "cutoff": cutoff})
+    joined = ref.join(
+        logs.select("msno", pl.col("cutoff").alias("_log_cutoff")), on="msno", how="inner"
+    )
+    bad = joined.filter(pl.col("cutoff") != pl.col("_log_cutoff"))
+    if bad.height:
+        sample = bad.head(1).row(0, named=True)
+        raise AssertionError(
+            f"收聽特徵與 cohort 不符：{bad.height:,} 位用戶的 cutoff 對不上"
+            f"（例：{sample['msno'][:12]}… cohort {sample['cutoff']}"
+            f" vs 日誌 {sample['_log_cutoff']}）。"
+            "這份收聽特徵是用別的 cohort 算的，本表不可使用。"
+        )
+
+
+def _attach_logs(
+    msno: pl.Series, cutoff: pl.Series, X: pl.DataFrame, logs: pl.DataFrame
+) -> pl.DataFrame:
     """把收聽特徵 left join 到交易特徵上。
 
     沒有收聽紀錄的用戶：`log_has_logs` 填 0，其餘 log 欄位保持 null 讓
@@ -301,12 +372,15 @@ def _attach_logs(msno: pl.Series, X: pl.DataFrame, logs: pl.DataFrame) -> pl.Dat
     # 紅線 1 的守門就是這樣設計的（`build_cohort()` 每次都跑），這裡讓紅線 2
     # 對齊同一個標準：**資料要進入模型之前，在最後一道門再確認一次。**
     assert_logs_within_cutoff(logs)
+    assert_logs_match_cohort(msno, cutoff, logs)
 
     joined = (
         pl.DataFrame({"msno": msno})
         .join(logs, on="msno", how="left")
         .with_columns(pl.col("log_has_logs").fill_null(0.0))
-        .drop("msno")
+        # `cutoff` 只是出身證明，驗證完就丟 —— 它不是特徵。留著會讓模型看到
+        # 原始日期，而那正是本模組開頭第二條設計決定禁止的事。
+        .drop("msno", "cutoff")
     )
     if joined.height != X.height:
         raise ValueError(f"join 後列數改變（{X.height} → {joined.height}），收聽特徵有重複的 msno")

@@ -469,8 +469,8 @@ log loss @ 新進用戶子群 (9.19%)   ← 高風險、高不確定性
 
 | # | 紅線 | 為什麼 | 對應測試（`tests/test_no_leakage.py`） | 狀態 |
 |---|---|---|---|---|
-| 1 | 任何 `transaction_date > cutoff` 的交易**不得**進入特徵 | 到期日之後的交易**就是標籤**。這是本題的頭號洩漏 | `test_red_line_1_guard_catches_violation` 等 4 項 | ✅ |
-| 2 | 任何 `user_logs.date > cutoff` 的日誌**不得**進入特徵 | 到期後的收聽行為是結果，不是原因 | `test_red_line_2_guard_catches_post_cutoff_logs` 等 4 項 | ✅ |
+| 1 | 任何 `transaction_date > cutoff` 的交易**不得**進入特徵 | 到期日之後的交易**就是標籤**。這是本題的頭號洩漏 | `test_red_line_1_guard_catches_violation` 等 4 項；另由 `assert_cutoffs_within_window()` 守住「cutoff 自己屬於哪個 cohort」（§7.9） | ✅ |
+| 2 | 任何 `user_logs.date > cutoff` 的日誌**不得**進入特徵 | 到期後的收聽行為是結果，不是原因 | `test_red_line_2_guard_catches_post_cutoff_logs` 等 4 項；另由 `assert_logs_match_cohort()` 守住「這份日誌是哪個 cohort 算的」（§7.9） | ✅ |
 | 3 | **禁用 `members.csv`，只能用 `members_v3.csv`** | `members.csv` 的 `expiration_date` 是快照欄位，官方在 2017-11-13 特地發布 v3 就是為了**移除這個洩漏欄位** | `test_red_line_3_no_code_reads_members_csv` 等 2 項 | ✅ |
 | 4 | 合併多 cohort 時必須 `GroupKFold(groups=msno)` | **實測 90.81% 的用戶跨兩期出現**，隨機切分會讓同一人同時在訓練與驗證集 | `test_red_line_4_groupkfold_when_cohorts_merged` | ⏸ 改等 M6（§7.4）|
 | 5 | 所有 imputation / scaling / encoding 統計量**必須在 fold 內計算** | 全表 `fillna(df.mean())` 會把驗證集資訊倒灌進訓練集。AI 產生的程式碼幾乎必犯 | `test_red_line_5_feature_builder_is_stateless` | ✅ |
@@ -874,7 +874,7 @@ M2 的基準是 **0.15821**。調參與篩選的基準是 **0.15836**（訓練�
 - **`FeatureSet.take()` 讓切列停在 polars 這一層**：XGBoost 與 CatBoost 需要帶欄名與 dtype 的表格才分得出哪幾欄是類別特徵
 - **`xgb_category_levels()` 只收一個 frame**：類別字典是「擬合出來的前處理狀態」，紅線 5 要求它只能在訓練資料內計算。簽名做成單一參數，讓 `xgb_category_levels(feb.X, mar.X, ...)` 這種寫法**根本寫不出來**
 - **MLflow 新增 6 個 run**（3 個模型 + 集成 + 篩選 + 調參）
-- **測試 95 passed · 1 skipped**，CI 的零 skip 檢查從 23 條升到 **61 條**
+- **測試 101 passed · 1 skipped**，CI 的零 skip 檢查從 23 條升到 **67 條**
 
 ---
 
@@ -1096,6 +1096,133 @@ Mar cohort 更差，只有 **95.09%**。兩個具體症狀：
 **代價**：M1–M4 的所有數字必須重測一次。這是第二次因為基礎設施問題重測全部 —— 第一次是 §7.5 的 cutoff 洩漏。
 
 **教訓**：兩次都不是模型或特徵的問題，是**資料管線的決定論**出問題。而兩次都只在「想量一個小效果」時才暴露出來 —— 因為在那之前，沒有人需要相信小數點後第四位。
+
+---
+
+### 7.9 第二次洩漏審查：六個守門缺口（2026-08-09 發現，2026-08-10 修正）
+
+§7.5 的第一次審查修掉了七個**已經發生**的洩漏。這一次審查問的是不同的問題：
+
+> **守門擋得住嗎？**
+
+作法是逐一檢視每個「資料進入模型」的邊界，對每個發現的缺口寫一條**會失敗的
+測試**（`tests/test_leakage_audit.py`），再修到它變綠。
+
+#### 共同成因：兩條紅線都只檢查內部一致性
+
+| 守門 | 它檢查什麼 | 它**不**檢查什麼 |
+|---|---|---|
+| `assert_asof_respected`（紅線 1） | 最後一筆交易不晚於 cutoff | **cutoff 本身對不對** |
+| `assert_logs_within_cutoff`（紅線 2） | 最近一筆日誌不晚於 cutoff | **這份日誌是不是別的 cohort 算的** |
+
+兩者都假設「基準點是對的」。而三個快取（cohort / 收聽特徵 / 收斂檔）都只驗證
+形狀，沒有任何一個記錄自己是用什麼參數算出來的 —— 快取檔名只帶 cohort 名稱，
+不帶到期區間、不帶窗口設定。
+
+**一份用錯參數產生的快取可以完整通過所有守門，而且分數會變好，因此不會有人
+起疑。**
+
+#### 六個缺口與修法
+
+| # | 嚴重性 | 缺口 | 修法 |
+|---|---|---|---|
+| 1 | **高** | cohort 快取不檢查 cutoff 是否落在宣告的到期區間 | 新增 `assert_cutoffs_within_window()` |
+| 2 | **高** | `build_features()` 接受任何 cohort 的收聽特徵 | 收聽特徵輸出帶 `cutoff` 欄，`assert_logs_match_cohort()` 逐人比對 |
+| 3 | 中 | 收聽特徵快取只驗證一個欄位 | `expected_log_columns()` 由 `LOG_WINDOWS` 推導，缺欄位就重算 |
+| 4 | 中 | `narrow_logs()` 快取命中時 `specs` 完全沒被使用 | 檔名帶日期範圍 `user_logs_window_{lo}_{hi}.parquet` |
+| 5 | 中 | 校準集是 M3 已用過兩次的同一批人 | 獨立的 `configs/calibration.yaml`，seed 20260809 |
+| 6 | 低 | `members_v3` 快照時點沒有被記錄 | 宣告 `MEMBERS_SNAPSHOT_DATE`，量化暴露面 |
+
+#### 第 2 條：實測 71.89% 的用戶會被影響
+
+這一條最值得細說，因為它示範了「守門擋不住自己想擋的東西」。
+
+把 Mar 的收聽特徵接到 Feb 的 cohort 上：
+
+```
+Feb cohort 992,912 人，Mar 收聽特徵 796,298 人 → 可 join 上 713,835 人（71.89%）
+build_features(Feb cohort, Mar 收聽特徵) → 沒有拋出任何例外，產出 (992912, 61)
+交集用戶的 Mar cutoff 比 Feb cutoff 晚：中位數 28 天，最大 58 天
+```
+
+**紅線 2 必然放行** —— 它檢查 `log_min_days_before >= 0`，而那是相對於**日誌
+自己那個** cutoff。Mar 的日誌對 Mar 的 cutoff 當然合法。
+
+於是「二月到期的用戶」的特徵含了到期後 28 天的收聽行為 —— 而 Feb 的標籤正是
+由那段時間決定的。整個過程沒有一行程式碼會抱怨。
+
+**修法**：`build_log_features()` 在輸出裡帶 `cutoff` 欄（**出身證明，不是特徵**，
+`build_features()` 驗證完就 drop），由 `assert_logs_match_cohort()` 逐人比對。
+修正後同一個呼叫會擋下 713,835 位用戶的不符。
+
+#### 一個順序上的教訓
+
+第一版把 schema 檢查放在紅線 2 之前，結果弄壞了 §7.5 留下的
+`test_log_feature_cache_hit_is_revalidated_before_use` —— **一份含洩漏的快取
+會被「反正要重算」默默蓋過去**。
+
+已改為 **先驗洩漏（raise），再驗過時（重算）**。兩者處置本來就不同：
+
+- **洩漏**代表出了嚴重的事，必須整支中斷讓人看見
+- **過時**只是要重算，是正常維護
+
+把兩者混在同一個分支，等於讓嚴重的錯誤被例行處置吸收掉。
+
+#### 第 5 條的殘餘風險（誠實記錄）
+
+換 seed **不等於隔離**。校準集與 M3 的選擇集期望重疊仍有約 15%（原本是 100%）。
+
+要完全不重疊需要四段切分（train / es / sel / cal），代價是再縮小訓練集並讓
+M1–M4 全部重測。**由於 M3 的兩個選擇（null importance 門檻、超參數）最後都
+沒有被採用**（§7.4），`sel` 對現行模型的實際影響為零，因此換 seed 是相稱的
+處置。**M6 重訓最終模型時應改採四段切分。**
+
+#### 第 6 條沒有修任何東西
+
+`members_v3.csv` 是 2017-11-13 的快照，不是 as-of 各 cohort cutoff 的狀態。
+一位用戶若在 2017 年年中搬家，Feb cohort 的特徵會拿到 cutoff 之後才成立的值。
+
+**這是本專案唯一一個已知、且無法從資料修復的洩漏** —— 資料集沒有提供屬性的
+歷史版本。實測暴露面：
+
+| 欄位 | gain 佔比 |
+|---|---|
+| `city` | 0.365% |
+| `registered_via` | 0.255% |
+| `bd`（clean + valid） | 0.253% |
+| `in_members` | 0.028% |
+| `gender` | 0.024% |
+| **合計** | **0.93%** |
+
+`registration_init_time`（0.43%）**不受影響** —— 註冊日不會事後變動。
+
+0.93% 是**上界**且很可能高估甚多（多數人的城市與性別本來就不會變）。
+
+**為什麼仍要寫下來**：§4 的評分條款是「出現資料洩漏**且未察覺**，該項直接
+0 分」。這一條無法消除，能做的是把它量化並記錄 —— 一份沒有標註時點的快照，
+讀者無從判斷屬性有多舊，也就無法評估風險。M6 的 `MODEL_CARD.md` 需要這個
+數字。常數寫在 `src/features/build.py::MEMBERS_SNAPSHOT_DATE`。
+
+#### 影響範圍：分數完全沒有變
+
+六條修正**全部是守門，不動任何特徵定義**。修正後實測：
+
+```
+特徵數 61（cutoff 未進入特徵矩陣）
+M2 Mar log loss 0.15821 —— 與修正前逐位元相同
+```
+
+這是刻意的驗收條件：一個「加了檢查卻改變了分數」的修正，代表它其實動到了
+計算，那就必須先解釋為什麼。
+
+#### 測試
+
+`tests/test_leakage_audit.py` 六條。原始版本全紅（漏洞存在的證據），修正後
+改寫成守門測試 —— **同樣的違規輸入，現在必須被擋下來**。全套件
+**101 passed · 1 skipped**。
+
+⚠️ 這是 SPEC §5 對每條紅線的要求：只證明「正常資料會通過」證明不了任何事，
+一個永遠回傳 `None` 的空函式也會通過。
 
 ---
 

@@ -135,6 +135,39 @@ def assert_asof_respected(df: pl.DataFrame) -> None:
         )
 
 
+def assert_cutoffs_within_window(df: pl.DataFrame, spec: CohortSpec) -> None:
+    """守門：每個 cutoff 都必須落在這個 cohort 宣告的到期區間內。
+
+    **這條檢查補的是紅線 1 的盲點。**
+
+    `assert_asof_respected()` 驗證的是「最後一筆交易不晚於 cutoff」—— 它假設
+    cutoff 本身是對的。但 cutoff 可能整個來自另一個 cohort：把 Mar 的表放進
+    `feb_cohort_asof.parquet`（共用 `interim/`、複製時改錯名、先跑 MAR 再改名），
+    紅線 1 依然成立（Mar 的 last_tx 當然不晚於 Mar 的 cutoff），欄位檢查是
+    超集比對也會通過。
+
+    於是「二月到期的用戶」拿到三月的 cutoff，特徵裡就含了三月的交易 ——
+    而 Feb 的標籤正是由三月的行為決定的。分數會變好，因此不會有人起疑。
+
+    兩個 cohort 的到期區間不重疊，所以這個檢查對「拿錯 cohort」是決定性的：
+    Mar 的 cutoff 全部落在 20170301~20170331，一條都進不了 Feb 的區間。
+
+    Raises:
+        AssertionError: 存在落在區間外的 cutoff。
+    """
+    if "cutoff" not in df.columns:
+        raise KeyError("缺少檢查所需的欄位 'cutoff'")
+
+    outside = df.filter(~pl.col("cutoff").is_between(spec.expire_start, spec.expire_end))
+    if outside.height:
+        lo, hi = outside["cutoff"].min(), outside["cutoff"].max()
+        raise AssertionError(
+            f"cohort 錯置：{outside.height:,} 列的 cutoff 落在 {spec.name} 宣告的到期區間"
+            f"（{spec.expire_start}~{spec.expire_end}）之外，實際範圍 {lo}~{hi}。"
+            "這份資料不屬於這個 cohort，本表不可使用。"
+        )
+
+
 def build_cohort(
     spec: CohortSpec | str = FEB,
     paths: Paths | None = None,
@@ -177,6 +210,9 @@ def build_cohort(
             #
             # 這一步的成本是掃兩欄比大小，相對於重算整個 cohort 微不足道。
             assert_asof_respected(cached)
+            # 紅線 1 只檢查「last_tx <= cutoff」，對「這份資料屬於哪個 cohort」
+            # 沒有意見。這一行補上那個盲點 —— 見 assert_cutoffs_within_window。
+            assert_cutoffs_within_window(cached, spec)
             log(f"讀取快取 {cache.name}（{cached.height:,} 列）")
             return cached
         log(f"快取 {cache.name} 的欄位與目前的 schema 不符，重算")
@@ -276,9 +312,10 @@ def build_cohort(
         .collect(engine="streaming")
     )
 
-    # ---- 步驟 4：紅線 1 守門檢查 ----
+    # ---- 步驟 4：守門檢查 ----
     # 永遠會跑，不是只在測試裡。洩漏一旦發生，寧可整支爆掉也不要靜靜產出錯的表。
     assert_asof_respected(out)
+    assert_cutoffs_within_window(out, spec)
 
     out.write_parquet(cache)
     log(f"  完成 {out.height:,} 列 × {out.width} 欄，已快取 → {cache.name}")

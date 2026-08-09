@@ -81,6 +81,36 @@ def log_feature_group(name: str) -> str | None:
     return None  # log_has_logs 等不屬於任何行為分組的旗標
 
 
+def expected_log_columns() -> frozenset[str]:
+    """收聽特徵表**應該**有的欄位，由 `LOG_WINDOWS` 推導。
+
+    刻意不寫死清單：加一個窗口（例如 60 天）之後，這個集合會自動變大，
+    舊快取因此對不上而重算。寫死的話新窗口只會靜靜地不存在。
+    """
+    cols = {
+        "msno",
+        "cutoff",
+        "log_min_days_before",
+        "log_max_days_before",
+        "log_has_logs",
+        "log_trend_7_30",
+        "log_trend_30_90",
+        "log_trend_active_7_30",
+    }
+    for w in LOG_WINDOWS:
+        cols |= {
+            f"log{w}_active_days",
+            f"log{w}_secs",
+            f"log{w}_plays",
+            f"log{w}_completed",
+            f"log{w}_unq",
+            f"log{w}_completion",
+            f"log{w}_active_ratio",
+            f"log{w}_secs_per_active_day",
+        }
+    return frozenset(cols)
+
+
 def _to_date(yyyymmdd: int) -> date:
     s = str(yyyymmdd)
     return date(int(s[:4]), int(s[4:6]), int(s[6:]))
@@ -150,12 +180,16 @@ def narrow_logs(
         if verbose:
             print(msg, flush=True)
 
-    out = paths.interim / "user_logs_window.parquet"
+    # 檔名帶上實際的日期範圍。**快取命中的判斷不能只看「檔案在不在」** ——
+    # 一份只為 Feb 收斂過的檔（上界 2017-02-28、只含 Feb 用戶）會被 Mar 的
+    # 特徵計算直接沿用，而紅線 2 只檢查非負，缺資料它管不著。
+    # 範圍寫進檔名之後，換一組 specs 自然就 miss。
+    lo, hi = window_bounds(specs)
+    out = paths.interim / f"user_logs_window_{lo}_{hi}.parquet"
     if out.exists() and not force:
         log(f"讀取既有的收斂檔 {out.name}")
         return out
 
-    lo, hi = window_bounds(specs)
     span = (_to_date(hi) - _to_date(lo)).days + 1
     log(f"收斂 user_logs 至 {lo} ~ {hi}（{span} 天）...")
 
@@ -265,11 +299,22 @@ def build_log_features(
         # **之後**的收聽行為 —— 那是標籤的結果而不是原因，餵進模型分數會
         # 變好，因此不會有人察覺。
         #
-        # 守門函式本身會在缺欄位時 raise KeyError，所以這一行同時也是
-        # schema 檢查，不必另外寫一份。
+        # ⚠️ **順序有意義：先驗洩漏，再驗過時。**
+        #
+        # 紅線 2 先跑 —— 一份含 cutoff 之後日誌的快取代表出了嚴重的事，
+        # 必須整支中斷讓人看見，不能被「反正要重算」默默蓋過去。
         assert_logs_within_cutoff(cached)
-        log(f"讀取快取 {cache.name}（{cached.height:,} 列）")
-        return cached
+
+        # 守門只讀 `log_min_days_before` 一欄，**不足以當 schema 檢查**。
+        # 一份只有三欄的舊快取（例如改了 LOG_WINDOWS 之前產生的）會完整
+        # 通過紅線 2，然後讓模型少掉 37 個特徵照樣訓練成功 —— 分數變差卻
+        # 找不出原因。過時與洩漏是兩件事，處置也不同：過時重算即可。
+        missing = expected_log_columns() - set(cached.columns)
+        if missing:
+            log(f"快取 {cache.name} 缺少欄位 {sorted(missing)}，重算")
+        else:
+            log(f"讀取快取 {cache.name}（{cached.height:,} 列）")
+            return cached
 
     narrowed = narrow_logs(paths, verbose=verbose)
 
@@ -292,6 +337,12 @@ def build_log_features(
         .with_columns(pl.sum_horizontal(PLAY_COLUMNS).alias("plays"))
         .group_by("msno")
         .agg(
+            # cutoff 一起帶出來。它不是特徵（`build_features` 會丟掉），
+            # 而是**出身證明**：讓下游能驗證「這份收聽特徵是用哪個 cutoff
+            # 算的」。少了它，一份用 Mar cutoff 算的日誌可以無聲無息地接到
+            # Feb 的 cohort 上，而紅線 2 必然放行 —— 因為它檢查的是
+            # log_min_days_before 相對於**自己那個** cutoff 是否非負。
+            pl.col("cutoff").first(),
             pl.col("days_before").min().alias("log_min_days_before"),
             pl.col("days_before").max().alias("log_max_days_before"),
             *[e for w in LOG_WINDOWS for e in _window_aggs(w)],

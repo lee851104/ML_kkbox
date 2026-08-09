@@ -65,18 +65,20 @@ COLORS = {"全體": "#333333", "重複用戶": "#1f77b4", "新進用戶": "#d627
 
 
 def load_split_config() -> dict:
-    """三段切分的設定沿用 configs/tuning.yaml，不另開一份。
+    """校準用**自己的**三段切分（`configs/calibration.yaml`）。
 
-    兩個檔案各寫一份 split_seed，遲早會不同步 —— 屆時「校準器 fit 在模型
-    沒看過的那一塊」這個保證就悄悄失效，而且不會有任何錯誤訊息。
+    ⚠️ 早期版本直接讀 `configs/tuning.yaml`，於是同一批 15% 的用戶依序被用來
+    挑 null importance 門檻、挑超參數、再 fit 校準器 —— 那一塊作為「乾淨保留
+    集」的身分已經被消耗過兩次。現在用不同的 seed，期望重疊降到約 15%。
+    理由與殘餘風險寫在該設定檔裡。
     """
     import yaml
 
     from src.config import REPO_ROOT
 
-    path = REPO_ROOT / "configs" / "tuning.yaml"
+    path = REPO_ROOT / "configs" / "calibration.yaml"
     if not path.exists():
-        raise FileNotFoundError(f"找不到 {path}（校準沿用它的三段切分設定）")
+        raise FileNotFoundError(f"找不到 {path}")
     cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if "split" not in cfg:
         raise KeyError(f"{path} 缺少 [split] 區段")
