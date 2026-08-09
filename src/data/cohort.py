@@ -257,6 +257,22 @@ def build_cohort(
     out = (
         asof.join(pl.scan_csv(paths.raw / "members_v3.csv"), on="msno", how="left")
         .with_columns(pl.col("city").is_not_null().alias("in_members"))
+        # ---- 依 msno 排序，讓列順序可重現 ----
+        #
+        # ⚠️ 這一行不是為了美觀，是**可重現性的必要條件**。
+        #
+        # polars 的 `group_by` 不保證輸出的列順序，實測同一份輸入重建兩次
+        # 會得到不同的順序。而下游的 `train_test_split` 是**依位置**切分的
+        # ——順序一變，train / early-stopping 就換一批人，分數跟著變。
+        #
+        # 實測這個效應的量級：同一份設定、同一份原始資料，只因重建快取，
+        # M2 的 Mar log loss 在 0.15853 ~ 0.15910 之間跳動（差 0.00057，
+        # 約 0.7 個 5-fold 標準差）。那和我們想量的特徵效果同一個量級 ——
+        # 不固定順序，任何小於 1σ 的比較都是在量重建快取的運氣。
+        #
+        # 排 msno 而不是保留輸入順序：msno 是唯一鍵，排序結果與掃檔順序、
+        # 執行緒數、polars 版本都無關。
+        .sort("msno")
         .collect(engine="streaming")
     )
 

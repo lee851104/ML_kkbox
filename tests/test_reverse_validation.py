@@ -12,20 +12,20 @@ import pytest
 from scripts.reverse_validation import NOISE_SIGMA, pairwise_stability
 from tests.conftest import NODATA
 
-# 2026-08-08 實測值（make reverse）。寫死在這裡，讓判定邏輯的改動能立刻
-# 對照到「當時那批數字會被判成什麼」，而不必重跑 12 分鐘。
+# 2026-08-09 實測值（make reverse，列順序修正之後）。寫死在這裡，讓判定
+# 邏輯的改動能立刻對照到「當時那批數字會被判成什麼」，不必重跑 12 分鐘。
 MEASURED = {
     "forward": {
-        "CatBoost": 0.15781,
-        "三者平均": 0.15796,
-        "LightGBM": 0.15910,
-        "XGBoost": 0.16082,
+        "CatBoost": 0.15685,
+        "三者平均": 0.15696,
+        "LightGBM": 0.15821,
+        "XGBoost": 0.15949,
     },
     "reverse": {
-        "CatBoost": 0.11597,
-        "三者平均": 0.11566,
-        "LightGBM": 0.11675,
-        "XGBoost": 0.11758,
+        "CatBoost": 0.11802,
+        "三者平均": 0.11798,
+        "LightGBM": 0.11909,
+        "XGBoost": 0.11992,
     },
 }
 
@@ -38,7 +38,7 @@ def _verdict(table, pair: str) -> str:
 
 @NODATA
 def test_tiny_rank_flip_is_classified_as_noise():
-    """CatBoost 與三者平均在兩個方向換了位，但差距只有 0.2~0.4σ。
+    """CatBoost 與三者平均在兩個方向換了位，但差距只有 0.1~0.2σ。
 
     這種換位不構成「結論翻轉」—— 它代表兩個選項分不出高下。舊版只比排名的
     寫法會把它標成 ❌，等於用雜訊推翻自己的結論。
@@ -57,13 +57,31 @@ def test_consistent_large_gap_is_trusted():
 
 @NODATA
 def test_one_sided_gap_is_flagged_as_doubtful():
-    """正向 1.5σ、反向 0.9σ —— 方向一致但撐不過門檻，判為存疑而非可信。
+    """方向一致但有一邊撐不過門檻時，判為存疑而非可信。
 
-    這一條守的是「不要因為方向一致就宣稱結論成立」。CatBoost 贏 LightGBM
-    在正向看起來明確，換個方向就掉到 1σ 以下。
+    這一條守的是「不要因為方向一致就宣稱結論成立」。用人造數字而非實測值：
+    修掉列順序不決定性之後，實測的六組比較裡已經沒有落在這一格的（見
+    SPEC §7.6），但規則本身仍必須守得住。
+    """
+    one_sided = {
+        "forward": {"A": 0.100, "B": 0.100 + 2 * NOISE_SIGMA},
+        "reverse": {"A": 0.100, "B": 0.100 + 0.5 * NOISE_SIGMA},
+    }
+    table = pairwise_stability(one_sided)
+    assert _verdict(table, "A vs B") == "存疑"
+
+
+@NODATA
+def test_catboost_beats_lightgbm_in_both_directions():
+    """實測：CatBoost 對 LightGBM 的優勢在兩個方向都超過 2σ。
+
+    ⚠️ 這一條在列順序修正**之前**是「存疑」（正向 1.54σ、反向 0.93σ）。
+    把不決定性修掉、並改用量在 Mar 上的 σ 之後，同一個比較變成 2.83σ /
+    2.23σ。**雜訊底線估錯，會把真實效果誤判成雜訊** —— 這是 SPEC §7.8
+    的主要教訓，釘在這裡以免日後又被改回去。
     """
     table = pairwise_stability(MEASURED)
-    assert _verdict(table, "CatBoost vs LightGBM") == "存疑"
+    assert _verdict(table, "CatBoost vs LightGBM") == "可信"
 
 
 @NODATA
