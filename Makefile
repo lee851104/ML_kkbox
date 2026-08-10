@@ -7,7 +7,7 @@
 #    效果完全相同 —— 本檔案只是那些指令的集中索引。安裝方式見 README。
 
 .DEFAULT_GOAL := help
-.PHONY: help setup data data-all lint format test test-fast test-ci eda features ablation train compare select encode tune reverse calibrate calibrate-fit multi-seed verify-rebuild rebaseline mlflow clean eval explain lead-time artifact artifact-t7 serve
+.PHONY: help setup data data-all lint format test test-fast test-ci eda features ablation train compare select encode tune reverse calibrate calibrate-fit multi-seed verify-rebuild rebaseline mlflow clean eval explain lead-time artifact artifact-t7 serve drift
 
 help:
 	@echo "可用目標："
@@ -50,6 +50,7 @@ help:
 	@echo "  artifact   M6 匯出模型 artifact（T=0，離線基準，約 5 分鐘）"
 	@echo "  artifact-t7 M6 匯出 T−7 的 artifact —— **能上線的那一個**（約 5 分鐘）"
 	@echo "  serve      M6 起 FastAPI /predict（文件在 /docs）"
+	@echo "  drift      M6 PSI 漂移監控報告 + 圖 16（約 3 分鐘，不重訓）"
 
 # --- 環境與資料 ------------------------------------------------------------
 
@@ -214,3 +215,10 @@ artifact-t7:
 #    請求時才壞，而那通常是在別人的 Demo 上。先跑 make artifact-t7。
 serve:
 	uv run uvicorn src.serving.app:app --host 127.0.0.1 --port 8000
+
+# PSI 漂移監控。**不重訓** —— 模型從 artifact 載入（那是 artifact 的用途之一）。
+#
+# 報三個數字：特徵 PSI、分數 PSI、以及實際的標籤漂移。第三個在部署時拿不到，
+# 量它的目的是回答「這套監控會漏掉什麼」。實測答案是：**基準率漂移它看不到**。
+drift:
+	uv run python scripts/drift_report.py
