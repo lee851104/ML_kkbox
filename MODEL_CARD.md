@@ -6,9 +6,10 @@
 特徵、什麼假設、哪一版程式）。這份文件不重複那些欄位，它寫的是 JSON 承載不了的
 東西：限制、盲區、以及每一個限制底下的實測數字。
 
-> ⚠️ **每一個數字都標了它是哪個模型、在哪個 cohort 上量的。** 本專案有兩份
-> artifact（`catboost_lead0d` / `catboost_lead7d`），它們的 cohort 成員不同，
-> **分數不可互相比大小**（[SPEC §7.15](SPEC.md)）。標籤沒有標的數字一律是上線那一份。
+> ⚠️ **每一個數字都標了它是哪個模型、在哪個 cohort 上量的。** 本專案有**三份**
+> artifact（見 §1），它們的 cohort 成員、特徵集與提前天數都不同，**分數不可互相比
+> 大小**（[SPEC §7.15](SPEC.md) / [§7.19](SPEC.md)）。沒有特別標的數字一律是上線那一份
+> （`catboost_lead7d`）。
 
 ---
 
@@ -28,10 +29,22 @@
 | 監控 | `make drift` → `reports/drift.json`，**有已知盲區**，見 §9.5 |
 | 授權 | 程式碼 MIT；資料 © KKBOX Group，依 WSDM Cup 2018 競賽規則使用，不隨 repo 散布 |
 
-**離線基準（不可上線）**：`catboost_lead0d`，`cutoff = 到期日`，Mar log loss
-0.15367。它在到期日當天評分，而挽回優惠那時已經來不及寄出（[SPEC §4.3](SPEC.md)），
-所以它的分數只是離線參考。兩份 artifact 的 `deployable` 旗標與每一筆 `/predict`
+**本專案有三份 artifact，而它們是三個模型**（cohort 成員、特徵集、提前天數都不同，
+**分數不可互相比大小**）：
+
+| artifact | cutoff 規則 | 特徵 | 分數 | 用途 |
+|---|---|---|---|---|
+| `catboost_lead0d` | 到期日 | 61 | 0.15367（`mar`） | 離線基準，**不可上線** |
+| **`catboost_lead7d`** | 到期日 − 7 天 | 61 | **0.17921**（`mar_t7`） | **上線的那一份**（服務預設） |
+| `catboost_fixed` | 上個月最後一天（提前 1~31 天） | 62 | 0.17342（`mar_fixed`） | Kaggle 管線（§9.8） |
+
+`lead0d` 在到期日當天評分，而挽回優惠那時已經來不及寄出（[SPEC §4.3](SPEC.md)），
+所以它的分數只是離線參考。每一份 artifact 的 `deployable` 旗標與每一筆 `/predict`
 回應都會講出這件事。
+
+`catboost_fixed` 多一個特徵 `days_to_expire`：在固定評分日的設計下「還有幾天到期」
+是變動且**在評分時點看得到**的量；提前固定天數的設計裡它是常數，加了只是多一欄零
+gain（[SPEC §7.19](SPEC.md)）。
 
 ---
 
@@ -74,7 +87,7 @@ A/B 實驗，而本資料集沒有實驗組／對照組結構，無法回答。
 
 官方私榜（🥇 0.07974 / 第 20 名 0.10834）算在 **Apr cohort** 上，本專案的分數算在
 **Mar cohort** 上 —— 不同的資料集，直接比較沒有意義（[SPEC §3.3](SPEC.md)）。唯一
-可比的數字是 Apr cohort 的 late submission，**尚未提交**（§9.7）。
+可比的數字是 Apr cohort 的 late submission，**尚未提交**（§9.8）。
 
 **四、不可拿來對「現在」評分，除非另接一份線上交易表。**
 
@@ -104,7 +117,7 @@ transactions 表，本專案沒有。完整 payload 介面不受此限 —— �
 **as-of 截斷是這個專案的核心防線**：所有進入特徵的 `transaction_date` 與
 `user_logs.date` 必須 `<= cutoff`，由 `src/data/cohort.py` 與 `src/features/logs.py`
 的守門函式在**每次執行**時驗證（不是只在測試裡）。八條紅線的清單與狀態見
-[SPEC §5](SPEC.md)；其中紅線 4 仍未實作，見 §9.7。
+[SPEC §5](SPEC.md)；其中紅線 4 仍未實作，見 §9.8。
 
 **訓練用的標籤只有兩個月**。這限制了很多事：沒有第三個月可以當真正的測試集、
 沒有辦法量「跨季的季節性」、也沒有辦法用「最近一個完整月份」校準（§5）。
@@ -295,7 +308,23 @@ cohort。實測（Mar）：
 `epsilon_floored = true` 的欄位有單邊空箱，那時 PSI 的大小由 epsilon 決定，只能讀成
 「出現了參考期沒有的東西」。
 
-### 9.6 標籤定義本身的邊界
+### 9.6 ⚠️ 用這個模型對「下個月要到期的人」評分時，cutoff 不得超出資料涵蓋範圍
+
+這一條是做 Kaggle 管線時發現的（[SPEC §7.19](SPEC.md)）：交易與日誌都只到
+**20170331**，而 Apr cohort 要預測 4 月到期的人。若沿用 `cutoff = 到期日 − 7 天`，
+**77.64%** 的用戶（到期日在 4/8 之後）的 cutoff 會落在資料結束之後 —— 那時 as-of
+截斷變成空操作，特徵改由**資料集的結尾**決定：
+
+    days_since_last_tx    最多被放大 23 天（上線模型 13.6% 的 gain）
+    近 7 天收聽窗口        整段不存在 → 模型讀成「這個人沒在聽歌」（假的主張）
+
+**八條紅線一條都不會叫**（`last_tx <= cutoff` 必然成立）。第九條守門
+`assert_data_covers_cutoffs()` 因此存在，而正解是換設計（固定評分日），不是放行。
+
+部署時的對應意義：**評分批次的 cutoff 不能晚於你手上資料的最後一天**。上游延遲一天
+就會讓一批人的特徵少一天，而那不會報錯。
+
+### 9.7 標籤定義本身的邊界
 
 `is_churn` 是「到期後 30 天內沒有新的有效訂閱交易」。所以：
 
@@ -305,11 +334,11 @@ cohort。實測（Mar）：
 - 官方標籤的移植邏輯（`WSDMChurnLabeller.scala`）本專案驗證未過，因此**一律使用
   官方提供的標籤檔**，不自行重算（[SPEC §7.7](SPEC.md)）
 
-### 9.7 尚未完成的驗證
+### 9.8 尚未完成的驗證
 
 | 項目 | 狀態 | 影響 |
 |---|---|---|
-| Apr cohort 的 Kaggle late submission | 未提交 | **與 0.10834 可比的唯一數字仍然缺席**。目前所有分數都是自評 |
+| Apr cohort 的 Kaggle late submission | **提交檔已產生，尚未送出** | 907,471 列在 `reports/kaggle/`（`make kaggle`）。**與 0.10834 可比的唯一數字仍然缺席** —— 事前登記的預期是 **0.17342**（結構相同的本地對照 `feb_fixed → mar_fixed`）。分數回來要填進 README 與 SPEC §3.3，無論結果如何 |
 | 紅線 4：合併 cohort 時的 `GroupKFold(groups=msno)` | 未實作 | 上線前若用 Feb + Mar 全部資料重訓最終模型，**90.81% 的用戶跨兩期出現**，隨機切分會讓同一人同時進訓練與驗證。重訓前必須先補上（[SPEC §7.4](SPEC.md)） |
 | 群組公平性評估 | 未做 | 見 §10 |
 | Docker / HF Spaces 部署 | 未做 | 服務目前只在本機起過 |
@@ -356,7 +385,7 @@ cohort。實測（Mar）：
 
 **重訓前必須確認的三件事**：
 
-1. **紅線 4**：若要合併多個 cohort 重訓，切分必須 `GroupKFold(groups=msno)`（§9.7）
+1. **紅線 4**：若要合併多個 cohort 重訓，切分必須 `GroupKFold(groups=msno)`（§9.8）
 2. **`cutoff_definition`**：重訓 T−7 版本要用 `--lead-days 7`，`export_model.py` 會
    把它寫進 artifact，而服務會拒絕載入指紋不符的 artifact
 3. **快取的邏輯指紋**：特徵程式改了就要重建快取。`artifact.json` 記了匯出當時的
@@ -391,6 +420,7 @@ make test          # 292 passed · 1 skipped（唯一 skip 的是紅線 4）
 | 日期 | 內容 |
 |---|---|
 | 2026-08-10 | 首版。對應 artifact `catboost_lead7d`（`git 159625b` 之後匯出）、`reports/drift.json`、SPEC v0.11 |
+| 2026-08-10 | 補 Kaggle 管線（§9.6 的資料涵蓋範圍限制、§1 的三份 artifact 對照、§9.8 的提交狀態）。三份 artifact 都在 SPEC v0.13 的程式上重新匯出過，`lead0d` / `lead7d` 的分數逐位重現（0.15367 / 0.17921）|
 
 ⚠️ **這張卡與 artifact 綁在一起。** 重新匯出模型之後，§1 / §5 / §6 / §7 的數字都要
 重新量 —— 特別是 §5 的校準偏差與 §6 的名單大小。
