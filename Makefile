@@ -7,7 +7,7 @@
 #    效果完全相同 —— 本檔案只是那些指令的集中索引。安裝方式見 README。
 
 .DEFAULT_GOAL := help
-.PHONY: help setup data data-all lint format test test-fast test-ci eda features ablation train compare select encode tune reverse calibrate calibrate-fit verify-rebuild rebaseline mlflow clean eval serve
+.PHONY: help setup data data-all lint format test test-fast test-ci eda features ablation train compare select encode tune reverse calibrate calibrate-fit multi-seed verify-rebuild rebaseline mlflow clean eval serve
 
 help:
 	@echo "可用目標："
@@ -37,6 +37,7 @@ help:
 	@echo "  calibrate  M4 校準診斷：reliability diagram + Brier/ECE（約 1 分鐘）"
 	@echo "  calibrate-fit  M4 fit isotonic 校準器 + 校準前後對照（約 2 分鐘）"
 	@echo ""
+	@echo "  multi-seed     配對 multi-seed：量雜訊尺度 + 三家配對比較（約 35 分鐘）"
 	@echo "  verify-rebuild 連續強制重建快取兩次，驗證誰在哪裡完全不變（約 6 分鐘）"
 	@echo "  rebaseline     在固定基準上重跑 M1–M4 並留下完整紀錄（約 65 分鐘）"
 	@echo ""
@@ -132,6 +133,11 @@ calibrate:
 # 最後一列 Mar-oracle 是**故意違規**的洩漏對照組，只當上界，不可上線。
 calibrate-fit:
 	uv run python scripts/calibrate.py
+
+# 配對 multi-seed：8 個 seed × 3 家，三家共用同一次切分。量新的雜訊尺度，
+# 並用配對差的 95% CI 判定三家高下（約 35 分鐘）。
+multi-seed:
+	uv run python scripts/multi_seed.py
 
 # --- 可重現性 --------------------------------------------------------------
 
