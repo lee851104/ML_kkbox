@@ -126,9 +126,14 @@ def window_bounds(specs: tuple[CohortSpec, ...]) -> tuple[int, int]:
 
     下界是最早的 cutoff 再往前推 MAX_WINDOW 天；上界是最晚的 cutoff。
     範圍以外的日誌對任何特徵都沒有貢獻。
+
+    ⚠️ **要扣掉 `lead_days`。** M6 的提前評分版本（§4.3）把 cutoff 往前移，
+    它的 90 天窗口下界也跟著往前 —— 少扣這 7 天，`feb_t7` 最早那些人的窗口
+    開頭會落在收斂檔之外，於是他們的收聽特徵少算 7 天。那不會報錯：紅線 2
+    只檢查非負，缺資料它管不著（這也正是收斂檔把日期範圍寫進檔名的理由）。
     """
-    lo = min(_to_date(s.expire_start) for s in specs) - timedelta(days=MAX_WINDOW)
-    hi = max(s.expire_end for s in specs)
+    lo = min(_to_date(s.expire_start) - timedelta(days=s.lead_days + MAX_WINDOW) for s in specs)
+    hi = max(_to_int(_to_date(s.expire_end) - timedelta(days=s.lead_days)) for s in specs)
     return _to_int(lo), hi
 
 

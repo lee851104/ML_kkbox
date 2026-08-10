@@ -25,11 +25,35 @@ SPEC §4.3 的定義：
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, timedelta
 
 import polars as pl
 
 from src.config import Paths, load_paths
 from src.fingerprint import cache_is_current, logic_fingerprint, write_with_fingerprint
+
+
+def _shift_yyyymmdd(yyyymmdd: int, days: int) -> int:
+    """把 %Y%m%d 的整數往前／後移幾天。
+
+    ⚠️ **不可以直接做整數加減。** `20170301 - 7 = 20170294`，那不是日期 ——
+    YYYYMMDD 是十進位編碼不是天數。同一個坑在 `src/features/build.py` 也標了：
+    `20170301 - 20170228 = 73`，不是 1 天。這種錯不會報錯，只會產生垃圾。
+    """
+    d = date(yyyymmdd // 10000, yyyymmdd // 100 % 100, yyyymmdd % 100) + timedelta(days=days)
+    return d.year * 10000 + d.month * 100 + d.day
+
+
+def _shift_days_expr(col: str, days: int) -> pl.Expr:
+    """同上，但作用在一整欄上（走真正的日期型別，不是整數運算）。"""
+    shifted = pl.col(col).cast(pl.Int64).cast(pl.String).str.to_date("%Y%m%d") + pl.duration(
+        days=days
+    )
+    return (
+        (shifted.dt.year() * 10000 + shifted.dt.month() * 100 + shifted.dt.day())
+        .cast(pl.Int64)
+        .alias(col)
+    )
 
 
 @dataclass(frozen=True)
@@ -42,6 +66,17 @@ class CohortSpec:
         expire_start: 到期日區間下界（含），格式 %Y%m%d 的整數。
         expire_end:   到期日區間上界（含）。
         observation:  標籤的觀察期，僅供人閱讀與報表標示。
+        lead_days:    **提前幾天評分**（M6，SPEC §4.3）。0 是現行版本
+                      （`cutoff = 到期日`）；7 代表 `cutoff = 到期日 − 7 天`。
+
+    ## lead_days 改變的是 cutoff，不是標籤
+
+    標籤永遠是「到期後 30 天內有沒有續訂」—— 那是我們要預測的結果，不會因為
+    提前評分而改變。動的只有「評分那一刻看得到什麼」：提前 7 天，到期日當天
+    的續訂或取消還沒發生，`last_is_cancel` 幾乎必然是 0（M5 量到它佔投放名單
+    解釋強度的 42.35%，見 §7.14）。
+
+    **這才是能上線的模型**：挽回優惠要提前寄出才來得及（§4.3）。
     """
 
     name: str
@@ -49,6 +84,7 @@ class CohortSpec:
     expire_start: int
     expire_end: int
     observation: str
+    lead_days: int = 0
 
 
 # SPEC §4.2 的時間外驗證切分：
@@ -57,7 +93,25 @@ class CohortSpec:
 FEB = CohortSpec("feb", "train.csv", 20170201, 20170228, "2017-03")
 MAR = CohortSpec("mar", "train_v2.csv", 20170301, 20170331, "2017-04")
 
-COHORTS: dict[str, CohortSpec] = {c.name: c for c in (FEB, MAR)}
+# M6（§4.3）：同一批用戶、同一組標籤，只把評分時點提前 7 天。
+#
+# ⚠️ **cohort 成員可能因此變少。** 一位用戶若在到期前 7 天內才產生第一筆交易，
+#    截斷之後他一列都不剩 —— 提前 7 天評分時，這個人還沒有可用的歷史。那不是
+#    bug，是部署現實；`scripts/lead_time.py` 會把掉出去的人數報出來，並在交集
+#    上另做一次同群比較。
+FEB_T7 = CohortSpec("feb_t7", "train.csv", 20170201, 20170228, "2017-03", lead_days=7)
+MAR_T7 = CohortSpec("mar_t7", "train_v2.csv", 20170301, 20170331, "2017-04", lead_days=7)
+
+COHORTS: dict[str, CohortSpec] = {c.name: c for c in (FEB, MAR, FEB_T7, MAR_T7)}
+
+
+def cutoff_window(spec: CohortSpec) -> tuple[int, int]:
+    """這個 spec 的 cutoff 實際落在哪個區間 —— 到期區間往前移 `lead_days` 天。"""
+    return (
+        _shift_yyyymmdd(spec.expire_start, -spec.lead_days),
+        _shift_yyyymmdd(spec.expire_end, -spec.lead_days),
+    )
+
 
 # 快取的 schema。欄位對不上就重算 —— 比要求使用者手動刪快取好，
 # 因為「忘記刪快取所以看到舊結果」是很難察覺的錯誤。
@@ -242,19 +296,32 @@ def assert_cutoffs_within_window(df: pl.DataFrame, spec: CohortSpec) -> None:
     兩個 cohort 的到期區間不重疊，所以這個檢查對「拿錯 cohort」是決定性的：
     Mar 的 cutoff 全部落在 20170301~20170331，一條都進不了 Feb 的區間。
 
+    ⚠️ **`lead_days` 讓區間跟著往前移，而這削弱了上一段的「決定性」。**
+
+    比對的是 `cutoff` 落在哪，所以區間必須是「到期區間 − lead_days」：
+    `mar_t7` 的 cutoff 全部落在 20170222~20170324。而那與 `feb` 宣告的
+    20170201~20170228 **有 7 天重疊**（0222~0228）。
+
+    對一張**完整**的錯置表，這個檢查仍然會叫（mar_t7 有大量列落在 0228 之後，
+    整批進不了 feb 的區間）；但它不再是「由構造保證」的決定性檢查 —— 一個
+    只含 0222~0228 那幾天的子集可以蒙過去。這一點寫出來，是因為原本那句
+    「兩個區間不重疊」現在只對 lead_days 相同的兩個 cohort 成立。
+
     Raises:
         AssertionError: 存在落在區間外的 cutoff。
     """
     if "cutoff" not in df.columns:
         raise KeyError("缺少檢查所需的欄位 'cutoff'")
 
-    outside = df.filter(~pl.col("cutoff").is_between(spec.expire_start, spec.expire_end))
+    lo_bound, hi_bound = cutoff_window(spec)
+    outside = df.filter(~pl.col("cutoff").is_between(lo_bound, hi_bound))
     if outside.height:
         lo, hi = outside["cutoff"].min(), outside["cutoff"].max()
+        lead = f"（到期 {spec.expire_start}~{spec.expire_end} 提前 {spec.lead_days} 天）"
         raise AssertionError(
-            f"cohort 錯置：{outside.height:,} 列的 cutoff 落在 {spec.name} 宣告的到期區間"
-            f"（{spec.expire_start}~{spec.expire_end}）之外，實際範圍 {lo}~{hi}。"
-            "這份資料不屬於這個 cohort，本表不可使用。"
+            f"cohort 錯置：{outside.height:,} 列的 cutoff 落在 {spec.name} 宣告的 cutoff 區間"
+            f"（{lo_bound}~{hi_bound}{lead if spec.lead_days else ''}）之外，"
+            f"實際範圍 {lo}~{hi}。這份資料不屬於這個 cohort，本表不可使用。"
         )
 
 
@@ -411,6 +478,19 @@ def build_cohort(
         .agg(pl.col("membership_expire_date").max().alias("cutoff"))
         .collect(engine="streaming")
     )
+
+    # ---- 步驟 1b：提前評分（M6，§4.3）----
+    #
+    # `lead_days = 7` 把每個人的 cutoff 往前移 7 天，於是步驟 2 的截斷會把
+    # 到期前 7 天內的交易全部排除 —— 包含到期日當天那筆續訂或取消。
+    #
+    # ⚠️ **順序有意義：先選出 cohort 成員（用到期日），再移 cutoff。**
+    # 反過來（先移再選）會讓「誰在這個 cohort 裡」也跟著變，兩個版本就不是
+    # 同一批人，分數對照失去意義。成員仍可能在步驟 2 掉出去（截斷後一列不剩），
+    # 那是另一回事，而且是部署現實 —— 那個人數要報出來，見 scripts/lead_time.py。
+    if spec.lead_days:
+        cutoffs = cutoffs.with_columns(_shift_days_expr("cutoff", -spec.lead_days))
+        log(f"  提前 {spec.lead_days} 天評分：cutoff 已往前移（§4.3 的 M6 版本）")
 
     cohort = labels.join(cutoffs, on="msno", how="inner")
     log(f"  標籤 {labels.height:,} 人 → 對得上 cutoff {cohort.height:,} 人")
