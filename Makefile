@@ -44,7 +44,8 @@ help:
 	@echo "  mlflow     開啟 MLflow UI 檢視實驗紀錄"
 	@echo "  clean      清除 __pycache__ / .pytest_cache / .ruff_cache"
 	@echo ""
-	@echo "  eval / serve   尚未實作，見各目標訊息"
+	@echo "  eval       M4 業務指標：期望淨收益曲線 + 敏感度熱圖（約 5 分鐘）"
+	@echo "  serve      尚未實作，見該目標訊息"
 
 # --- 環境與資料 ------------------------------------------------------------
 
@@ -157,11 +158,14 @@ mlflow:
 clean:
 	uv run python -c "import shutil, pathlib; [shutil.rmtree(p, ignore_errors=True) for p in list(pathlib.Path('.').rglob('__pycache__')) + [pathlib.Path('.pytest_cache'), pathlib.Path('.ruff_cache')]]; print('已清除 __pycache__ / .pytest_cache / .ruff_cache')"
 
-# --- 尚未實作 --------------------------------------------------------------
-# 明確報錯而不是安靜地什麼都不做。一個成功但沒有產出的指令會讓人以為跑過了。
+# --- M4 業務指標 -------------------------------------------------------------
 
+# M4 業務指標。用 §7.12 正式採用的 CatBoost 產生機率，畫期望淨收益曲線與
+# 敏感度熱圖。參數在 configs/business.yaml。約 5 分鐘。
 eval:
-	@echo "make eval 尚未實作 —— M4（機率校準與業務指標）。M3 的評估請用 make compare / select / tune" && exit 1
+	uv run python scripts/business_value.py
 
+# 尚未實作的目標明確報錯，不安靜地什麼都不做 —— 一個成功但沒有產出的指令
+# 會讓人以為跑過了。
 serve:
 	@echo "make serve 尚未實作 —— M6（FastAPI /predict）" && exit 1

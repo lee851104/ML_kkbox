@@ -12,6 +12,17 @@
 features:
   use_logs: true
 
+# 用哪個模型產生機率。**CatBoost 是 §7.12 正式採用的模型**（Mar 0.15367，
+# 配對 multi-seed 8/8），業務曲線必須用會上線的那一個 —— 用 LightGBM 畫出
+# 來的曲線再漂亮，也不是我們要部署的東西。
+#
+# 超參數從 configs/model_comparison.yaml 讀，不在這裡複製一份：兩處各寫一份
+# 遲早會不同步，而「這條曲線是用哪組參數算的」屆時就沒有答案。
+#
+# ⚠️ §7.10 的校準診斷用的是 LightGBM（當時 M3 的選定模型）。本腳本會另外
+# 量一次 CatBoost 的整體低估幅度，因為那個數字會直接乘進每一筆金額。
+model: catboost
+
 business:
   # 基準情境：送一個月免費（KKBOX 月費 149 元）。
   #
