@@ -7,7 +7,7 @@
 #    效果完全相同 —— 本檔案只是那些指令的集中索引。安裝方式見 README。
 
 .DEFAULT_GOAL := help
-.PHONY: help setup data data-all lint format test test-fast test-ci eda features ablation train compare select encode tune reverse calibrate mlflow clean eval serve
+.PHONY: help setup data data-all lint format test test-fast test-ci eda features ablation train compare select encode tune reverse calibrate calibrate-fit mlflow clean eval serve
 
 help:
 	@echo "可用目標："
@@ -35,6 +35,7 @@ help:
 	@echo "  reverse    反向時間外驗證 Mar→Feb，檢查比較結論的穩健性（約 12 分鐘）"
 	@echo ""
 	@echo "  calibrate  M4 校準診斷：reliability diagram + Brier/ECE（約 1 分鐘）"
+	@echo "  calibrate-fit  M4 fit isotonic 校準器 + 校準前後對照（約 2 分鐘）"
 	@echo ""
 	@echo "  mlflow     開啟 MLflow UI 檢視實驗紀錄"
 	@echo "  clean      清除 __pycache__ / .pytest_cache / .ruff_cache"
@@ -123,6 +124,11 @@ reverse:
 # 還是 Platt。產出 reports/figures/09、10 兩張圖。
 calibrate:
 	uv run python scripts/calibration_report.py
+
+# 校準器本身。fit 在 Feb-sel，套到 Mar，並把代價（排序解析度）一起量出來。
+# 最後一列 Mar-oracle 是**故意違規**的洩漏對照組，只當上界，不可上線。
+calibrate-fit:
+	uv run python scripts/calibrate.py
 
 mlflow:
 	uv run mlflow ui --backend-store-uri sqlite:///mlflow.db

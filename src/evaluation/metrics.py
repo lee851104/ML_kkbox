@@ -67,6 +67,35 @@ def constant_log_loss(p_const: float, y_true: Iterable, *, eps: float = EPS) -> 
     return log_loss(y, pl.Series("p", [p_const] * y.len(), dtype=pl.Float64), eps=eps)
 
 
+def roc_auc(y_true: Iterable, y_pred: Iterable) -> float:
+    """AUC —— 只看排序，完全不看機率的絕對值。
+
+    M1–M3 沒有用到它（官方指標是 log loss，排序好但機率歪的模型不該被獎勵）。
+    M4 需要它的理由很具體：**校準與排序必須分開量**。
+
+    isotonic 會把失準的區段壓平成同一個值，壓平就是製造同分，而 AUC 是唯一
+    對同分有明確約定的指標：各給一半（等價於 ROC 曲線上走一段斜線）。log loss
+    做不到這件事 —— 它同時受校準與排序影響，兩者混在同一個數字裡，改善了也
+    說不出是哪一邊的功勞。
+
+    ⚠️ **校準後 AUC 上升不代表排序變好。** 單調映射不會倒轉任何一對的順序，
+    所以變化全部來自同分；而同分讓原本得 0 分的**反轉配對**變成 0.5 分。
+    被壓平的那一段原本排錯了，AUC 就會上升 —— 那是「誠實地宣告不知道」，
+    不是「學到了更多」。反過來，壓平原本排對的區段才會讓 AUC 下降。
+    測試 `test_flattening_an_inversion_raises_auc_instead_of_lowering_it`
+    用手算的數字釘住這件事。
+    """
+    from sklearn.metrics import roc_auc_score
+
+    y = pl.Series("y", y_true, dtype=pl.Float64)
+    p = pl.Series("p", y_pred, dtype=pl.Float64)
+    if y.len() != p.len():
+        raise ValueError(f"長度不符：y_true {y.len()} 筆，y_pred {p.len()} 筆")
+    if y.n_unique() < 2:
+        raise ValueError("只有單一類別時 AUC 沒有定義")
+    return float(roc_auc_score(y.to_numpy(), p.to_numpy()))
+
+
 def repeat_vs_new(msno: Iterable, previous_msno: Iterable) -> pl.Series:
     """把用戶標記成「重複用戶」或「新進用戶」（SPEC §4.5 的分群定義）。
 

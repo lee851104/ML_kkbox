@@ -12,23 +12,33 @@ from src.evaluation.calibration import (
     max_calibration_error,
     reliability_curve,
 )
+from src.evaluation.calibrator import (
+    IsotonicCalibrator,
+    fit_isotonic,
+    tie_profile,
+)
 from src.evaluation.metrics import (
     EPS,
     constant_log_loss,
     log_loss,
     repeat_vs_new,
+    roc_auc,
     segment_report,
 )
 
 __all__ = [
     "EPS",
+    "IsotonicCalibrator",
     "brier_score",
     "calibration_in_the_large",
     "constant_log_loss",
     "expected_calibration_error",
+    "fit_isotonic",
     "log_loss",
     "max_calibration_error",
     "reliability_curve",
     "repeat_vs_new",
+    "roc_auc",
     "segment_report",
+    "tie_profile",
 ]
