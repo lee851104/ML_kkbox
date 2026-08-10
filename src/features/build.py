@@ -291,7 +291,14 @@ def build_features(df: pl.DataFrame, logs: pl.DataFrame | None = None) -> Featur
         .fill_null(MISSING_CATEGORY)
         .cast(pl.Int32)
         .alias("registered_via"),
-        pl.col("last_payment_method_id").cast(pl.Int32),
+        # 這一欄以前不可能是 null（總能挑到「最後一筆」交易），所以原本沒有
+        # 填缺失。C′ 的逐欄位規則讓它會是 null 了：同一天多筆交易而付款方式
+        # 不一致時，「最後用哪種付款方式」沒有答案（實測 Feb 少數幾百人）。
+        #
+        # 沒填的話 CatBoost 直接爆掉（`must be real number, not NoneType`）——
+        # 它的 Pool 不接受類別欄有 None。LightGBM 反而不會叫，會安靜地把
+        # NaN 當成一個獨立分支，於是三家吃到的東西不一樣，比較就不公平。
+        pl.col("last_payment_method_id").fill_null(MISSING_CATEGORY).cast(pl.Int32),
         member_col("gender")
         .replace_strict(GENDER_CODES, default=MISSING_CATEGORY, return_dtype=pl.Int32)
         .alias("gender_code"),
