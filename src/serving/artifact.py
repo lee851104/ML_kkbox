@@ -142,14 +142,45 @@ class Artifact:
         return float(self.meta["assumptions"]["p_star"])
 
     @property
+    def scoring_design(self) -> str:
+        """評分規則的**種類**：`expire_date` / `lead_days` / `fixed_score_date`。
+
+        ⚠️ **`cutoff_definition` 帶著日期，種類不帶。** 固定評分日的設計裡，每個
+        月的評分日本來就不同（訓練是 `fixed_score_date_20170131`，套用到 4 月是
+        `fixed_score_date_20170331`）—— 拿整個字串去比相等，會把「同一個設計的
+        下一個月」誤判成「拿錯模型」。
+
+        這個區分是實際踩到的：Kaggle 推論腳本第一版比的是完整字串，於是一份完全
+        正確的 artifact 被擋下來。要比的是「這個模型期待的特徵是怎麼算出來的」，
+        而那由種類決定（`fixed_score_date` 的模型多一欄 `days_to_expire`）。
+        """
+        definition = self.cutoff_definition
+        if definition.startswith("fixed_score_date"):
+            return "fixed_score_date"
+        if definition.startswith("expire_date_minus"):
+            return "lead_days"
+        return "expire_date"
+
+    @property
+    def scores_at_expiry(self) -> bool:
+        """這個模型是在**到期日當天**評分的嗎。
+
+        ⚠️ **判準是 `cutoff_definition`，不是 `lead_days > 0`。** 固定評分日的
+        設計（M6 的 Kaggle 管線）`lead_days` 是 0 而提前天數其實是 1~30 天 ——
+        用 lead_days 判斷會把一個能上線的模型標成不能上線，而那種誤報的旗標
+        會被學會忽略（M5 的 `git_dirty`）。
+        """
+        return self.cutoff_definition == "expire_date"
+
+    @property
     def deployable(self) -> bool:
         """在到期日當天評分的模型**不是能上線的模型**（§4.3）。
 
-        挽回優惠要提前寄出才來得及，所以 `lead_days = 0` 的版本無論分數多好
-        都只是離線基準。這個旗標會出現在每一筆 `/predict` 的回應裡 —— 部署
-        錯版本是一個不會有任何錯誤訊息的錯誤，只能靠回應自己講出來。
+        挽回優惠要提前寄出才來得及，所以到期日評分的版本無論分數多好都只是
+        離線基準。這個旗標會出現在每一筆 `/predict` 的回應裡 —— 部署錯版本是
+        一個不會有任何錯誤訊息的錯誤，只能靠回應自己講出來。
         """
-        return self.lead_days > 0
+        return not self.scores_at_expiry
 
     def summary(self) -> dict[str, Any]:
         """給 `/health` 與 `/model` 的摘要。不含 61 個欄名那種長清單。"""

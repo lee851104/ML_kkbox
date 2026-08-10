@@ -7,7 +7,7 @@
 #    效果完全相同 —— 本檔案只是那些指令的集中索引。安裝方式見 README。
 
 .DEFAULT_GOAL := help
-.PHONY: help setup data data-all lint format test test-fast test-ci eda features ablation train compare select encode tune reverse calibrate calibrate-fit multi-seed verify-rebuild rebaseline mlflow clean eval explain lead-time artifact artifact-t7 serve drift
+.PHONY: help setup data data-all lint format test test-fast test-ci eda features ablation train compare select encode tune reverse calibrate calibrate-fit multi-seed verify-rebuild rebaseline mlflow clean eval explain lead-time artifact artifact-t7 artifact-fixed serve drift kaggle
 
 help:
 	@echo "可用目標："
@@ -49,8 +49,10 @@ help:
 	@echo "  lead-time  M6 提前 7 天評分的代價：兩版本共同子集比較（約 20 分鐘）"
 	@echo "  artifact   M6 匯出模型 artifact（T=0，離線基準，約 5 分鐘）"
 	@echo "  artifact-t7 M6 匯出 T−7 的 artifact —— **能上線的那一個**（約 5 分鐘）"
+	@echo "  artifact-fixed M6 匯出固定評分日的 artifact（Kaggle 管線用，約 5 分鐘）"
 	@echo "  serve      M6 起 FastAPI /predict（文件在 /docs）"
 	@echo "  drift      M6 PSI 漂移監控報告 + 圖 16（約 3 分鐘，不重訓）"
+	@echo "  kaggle     M6 產生 Apr cohort 的 Kaggle 提交檔（不自動提交）"
 
 # --- 環境與資料 ------------------------------------------------------------
 
@@ -199,14 +201,21 @@ lead-time:
 # ⚠️ 預設匯出的是 **T=0** 的版本，那是離線基準、**不可上線**（§4.3）。能上線的
 #    是提前 7 天的那個，也是 configs/serving.yaml 預設載入的那個：
 #
-#        uv run python scripts/export_model.py --lead-days 7
+#        uv run python scripts/export_model.py --design lead7
+#
+#    第三種設計 `--design fixed`（固定評分日）是 Kaggle 管線用的：交易與日誌只到
+#    2017-03-31，而測試集要預測 4 月到期的人 —— 「到期日 − 7 天」對 77.64% 的測試
+#    用戶會落在資料結束之後（見 src/data/cohort.py 的 assert_data_covers_cutoffs）。
 #
 #    只改了 configs/business.yaml（C_offer / r_save）時加 --reuse，不必重訓。
 artifact:
 	uv run python scripts/export_model.py
 
 artifact-t7:
-	uv run python scripts/export_model.py --lead-days 7
+	uv run python scripts/export_model.py --design lead7
+
+artifact-fixed:
+	uv run python scripts/export_model.py --design fixed
 
 # 起 /predict 服務。載哪一份 artifact 看 configs/serving.yaml（預設 T−7）。
 # 文件在 http://127.0.0.1:8000/docs —— OpenAPI 就是這個服務的說明書。
@@ -222,3 +231,12 @@ serve:
 # 量它的目的是回答「這套監控會漏掉什麼」。實測答案是：**基準率漂移它看不到**。
 drift:
 	uv run python scripts/drift_report.py
+
+# Apr cohort 的 Kaggle 提交檔（SPEC §3.3 的最後一條門檻）。**不自動提交** ——
+# 提交要接受競賽規則，那是帳號層級的動作，腳本只印出指令。
+#
+# ⚠️ 需要 `--design fixed` 的 artifact：交易與日誌只到 2017-03-31，而測試集要預測
+#    4 月到期的人。本地**算不出**這份預測的分數（測試集沒有標籤），所以腳本會先印出
+#    結構相同的本地對照當「事前登記的預期」。
+kaggle:
+	uv run python scripts/predict_kaggle.py

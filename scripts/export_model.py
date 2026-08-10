@@ -1,7 +1,8 @@
 """M6 · 把採用的模型匯出成一份可載入的 artifact（SPEC §7 M6）。
 
-    uv run python scripts/export_model.py                  # T=0（離線基準）
-    uv run python scripts/export_model.py --lead-days 7    # T−7（能上線的那個）
+    uv run python scripts/export_model.py                    # lead0：T=0（離線基準）
+    uv run python scripts/export_model.py --design lead7     # T−7（提前固定 7 天）
+    uv run python scripts/export_model.py --design fixed     # 固定評分日（Kaggle 管線）
     make artifact
 
 服務、HF Spaces Demo、Apr cohort 的 Kaggle 推論管線都載這一份東西，沒有人重訓
@@ -23,13 +24,20 @@ metadata 記什麼、為什麼要記那麼多，寫在 `src/serving/artifact.py`
 理由與 §6.1 用曲線極大值驗 `campaign_curve()`、M5 逐列驗加總恆等式相同：一條
 存了又載的路徑，失效方式是「機率安靜地偏掉」，那不能只靠讀程式碼判斷。
 
-## ⚠️ `--lead-days 7` 才是能上線的模型
+## ⚠️ `lead0` 不是能上線的模型
 
 §4.3：挽回優惠要提前寄出才來得及。§7.15 實測共同子集退步 18.11%，而那個較差的
-分數才是能上線的數字。`configs/serving.yaml` 預設載的是 T−7 那一份。
+分數才是能上線的數字。`configs/serving.yaml` 預設載的是 `lead7` 那一份。
 
-兩份 artifact 的目錄名不同（`catboost_lead0d` / `catboost_lead7d`），因為
-**它們是兩個模型**，不是同一個模型的兩個版本。
+三種設計的 artifact 目錄名不同（`catboost_lead0d`/`catboost_lead7d`/`catboost_fixed`），
+因為**它們是三個模型**，不是同一個模型的三個版本 —— cohort 成員、特徵集
+（`fixed` 多一欄 `days_to_expire`）與提前天數都不同，**分數不可互相比大小**。
+
+`fixed` 的存在理由是 Kaggle：交易與日誌都只到 2017-03-31，而測試集要預測 4 月
+到期的人。`到期日 − 7 天` 對 77.64% 的測試用戶會落在資料結束之後（見
+`src/data/cohort.py` 的 `assert_data_covers_cutoffs`）。固定評分日把「在 3/31
+這一天替所有 4 月到期的人評分」寫成一個誠實的設計，而 `feb_fixed → mar_fixed`
+的分數就是「該期待 Kaggle 給什麼」的本地估計。
 
 ## `--reuse`：只改業務假設時不必重訓
 
@@ -52,7 +60,17 @@ import numpy as np
 import yaml
 
 from src.config import REPO_ROOT, load_paths
-from src.data import FEB, FEB_T7, MAR, MAR_T7, CohortSpec, cutoff_definition, cutoff_window
+from src.data import (
+    FEB,
+    FEB_FIXED,
+    FEB_T7,
+    MAR,
+    MAR_FIXED,
+    MAR_T7,
+    CohortSpec,
+    cutoff_definition,
+    cutoff_window,
+)
 from src.data.cohort import cohort_fingerprint
 from src.evaluation import constant_log_loss, log_loss, resolve_assumptions
 from src.features.logs import log_features_fingerprint
@@ -70,7 +88,21 @@ ROUND_TRIP_ROWS = 5_000
 # 同一組葉子值，不是一個近似。訂一個 1e-9 的容差等於預先接受一個不該存在的差。
 ROUND_TRIP_ATOL = 0.0
 
-SPECS: dict[int, tuple[CohortSpec, CohortSpec]] = {0: (FEB, MAR), 7: (FEB_T7, MAR_T7)}
+# 三種評分規則 → (訓練 cohort, 評估 cohort)。
+#
+#   lead0  cutoff = 到期日             離線基準，**不可上線**（§4.3）
+#   lead7  cutoff = 到期日 − 7 天      提前固定天數
+#   fixed  cutoff = 上個月最後一天      固定評分日，提前天數 1~30 天 —— Kaggle
+#                                      測試集唯一做得到的設計（資料只到 3/31）
+DESIGNS: dict[str, tuple[CohortSpec, CohortSpec]] = {
+    "lead0": (FEB, MAR),
+    "lead7": (FEB_T7, MAR_T7),
+    "fixed": (FEB_FIXED, MAR_FIXED),
+}
+
+# artifact 目錄的預設名。lead 那兩個沿用既有的名字（`configs/serving.yaml` 與
+# 文件都指著它們）—— 改名的代價是一堆文件要跟著改，而換到的只是一致的拼法。
+ARTIFACT_SUFFIX = {"lead0": "lead0d", "lead7": "lead7d", "fixed": "fixed"}
 
 
 def git_state() -> tuple[str, bool]:
@@ -157,11 +189,13 @@ def verify_round_trip(directory, fitted, X, expected: np.ndarray) -> float:
 def main() -> int:
     ap = argparse.ArgumentParser(description="M6 匯出模型 artifact")
     ap.add_argument(
-        "--lead-days",
-        type=int,
-        default=0,
-        choices=sorted(SPECS),
-        help="提前幾天評分。**7 才是能上線的模型**（§4.3），0 是離線基準",
+        "--design",
+        default="lead0",
+        choices=sorted(DESIGNS),
+        help=(
+            "評分規則。lead0 = 到期日當天（離線基準，不可上線）、"
+            "lead7 = 提前 7 天、fixed = 固定評分日（提前 1~30 天，Kaggle 管線用）"
+        ),
     )
     ap.add_argument("--name", default=None, help="artifact 目錄名（預設 <模型>_lead<N>d）")
     ap.add_argument("--out", default=None, help="輸出目錄（預設 <data_root>/artifacts/<name>）")
@@ -182,14 +216,14 @@ def main() -> int:
     if dirty:
         print("⚠️ 工作區有未提交的改動 —— 這份 artifact 無法用 SHA 回溯。")
 
-    train_spec, valid_spec = SPECS[args.lead_days]
-    name = args.name or f"{ADOPTED_MODEL}_lead{args.lead_days}d"
+    train_spec, valid_spec = DESIGNS[args.design]
+    name = args.name or f"{ADOPTED_MODEL}_{ARTIFACT_SUFFIX[args.design]}"
     out_dir = paths.artifacts / name if args.out is None else Path(args.out)
 
     lo, hi = cutoff_window(train_spec)
     print(
         f"\n{'=' * 88}\n匯出 {name}：{train_spec.name} → {valid_spec.name}"
-        f"（提前 {args.lead_days} 天，cutoff 落在 {lo}~{hi}）\n{'=' * 88}"
+        f"（{cutoff_definition(train_spec)}，cutoff 落在 {lo}~{hi}）\n{'=' * 88}"
     )
 
     params, train_cfg = load_adopted_config()
@@ -241,7 +275,9 @@ def main() -> int:
         "cohort": {
             "train": train_spec.name,
             "eval": valid_spec.name,
-            "lead_days": args.lead_days,
+            "design": args.design,
+            "lead_days": train_spec.lead_days,
+            "score_date": train_spec.score_date,
             # 必填。少了它，一個到期日當天評分的模型可以被當成能上線的模型
             # 部署出去（見 src/serving/artifact.py）。
             "cutoff_definition": cutoff_definition(train_spec),
@@ -252,6 +288,23 @@ def main() -> int:
             "train_churn_rate": round(float(train.y.mean()), 6),
             "eval_churn_rate": round(float(valid.y.mean()), 6),
         },
+        # 固定評分日的**實際**提前天數（1~30 天不等）。這是那個設計的關鍵性質，
+        # 不記下來就無法回答「這個模型平均提前多久評分」。
+        "effective_lead_days": (
+            {
+                "min": int(valid.X["days_to_expire"].min()),
+                "median": float(valid.X["days_to_expire"].median()),
+                "max": int(valid.X["days_to_expire"].max()),
+                "negative": int((valid.X["days_to_expire"] < 0).sum()),
+            }
+            if "days_to_expire" in valid.X.columns
+            else {
+                "min": train_spec.lead_days,
+                "median": train_spec.lead_days,
+                "max": train_spec.lead_days,
+                "negative": 0,
+            }
+        ),
         "metrics": {
             "log_loss": round(ll, 5),
             "constant_baseline": round(baseline, 5),
@@ -274,11 +327,16 @@ def main() -> int:
             "基準率漂移，校準器看不到它）。整體偏低估，用在金額上要記得這件事。",
             "members_v3.csv 是 2017-11-13 的快照，不是 as-of cutoff 的狀態 ——"
             "本專案唯一已知且無法修復的洩漏，影響上界 0.93% 的 gain。",
-            f"lead_days = {args.lead_days}。"
+            f"cutoff_definition = {cutoff_definition(train_spec)}。"
             + (
                 "到期日當天評分，挽回優惠來不及寄出，**不可上線**（§4.3）。"
-                if args.lead_days == 0
-                else "提前 7 天評分，這是能上線的版本；代價見 §7.15。"
+                if args.design == "lead0"
+                else (
+                    "提前 7 天評分，這是能上線的版本；代價見 §7.15。"
+                    if args.design == "lead7"
+                    else "固定評分日：提前天數隨到期日變動（見 metadata 的"
+                    " effective_lead_days），這是 Kaggle 測試集唯一做得到的設計。"
+                )
             ),
         ],
     }
@@ -309,7 +367,7 @@ def main() -> int:
     print("=" * 88)
     print(
         f"  · 這份 artifact 的 cutoff 定義是 {meta['cohort']['cutoff_definition']}，"
-        f"{'**不可上線**（§4.3）' if args.lead_days == 0 else '可上線'}。\n"
+        f"{'**不可上線**（§4.3）' if args.design == 'lead0' else '可上線'}。\n"
         "  · 機率未校準，p* 由 configs/business.yaml 推導並存進 artifact ——"
         "服務端只比較，不重算（一列資料算不出 LTV）。\n"
         f"  · 起服務：make serve（載哪一份看 configs/serving.yaml，"

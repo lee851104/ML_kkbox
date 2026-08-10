@@ -158,11 +158,12 @@ def score_rows(
                 "這位用戶沒有任何推高風險的特徵組，因此沒有原因碼 —— "
                 "那不是錯誤，是「找不到該打電話的理由」。"
             )
-        if artifact.lead_days == 0 and any(r["expiry_dated"] for r in shown):
+        if artifact.scores_at_expiry and any(r["expiry_dated"] for r in shown):
             row_warnings.append(
-                "這個模型在到期日當天評分（lead_days = 0），而標為 expiry_dated 的"
-                "原因碼講的是到期日當天才發生的事 —— 提前 7 天寄挽回優惠時它還沒發生，"
-                "不可沿用。能上線的版本是 lead_days = 7 的 artifact（§4.3 / §7.15）。"
+                "這個模型在到期日當天評分（cutoff_definition = expire_date），"
+                "而標為 expiry_dated 的"
+                "原因碼講的是到期日當天才發生的事 —— 提前寄挽回優惠時它還沒發生，"
+                "不可沿用。能上線的版本是有提前量的那些 artifact（§4.3 / §7.15）。"
             )
         out.append(
             Scored(
