@@ -214,7 +214,10 @@ def main() -> int:
 
     scores = {k: {r.name: r.logloss for r in rows} for k, rows in by_direction.items()}
     pairs = pairwise_stability(scores)
-    print("\n--- 逐對比較（差距以 M1/M2 實測的 5-fold 標準差 σ=0.00084 為單位）---")
+    # ⚠️ 這行標題原本把 σ 寫死成 0.00084，而實際用的是 NOISE_SIGMA = 0.00048
+    # ——「換掉 σ」那次修正只改了常數，忘了改旁邊的字。報表上的數字與它自稱
+    # 的單位不一致，而讀報表的人沒有辦法察覺。改成直接引用常數。
+    print(f"\n--- 逐對比較（差距以 Mar log loss 的多 seed 標準差 σ={NOISE_SIGMA} 為單位）---")
     print(pairs)
 
     spread = {

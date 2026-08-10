@@ -1,14 +1,23 @@
 {
-  "git_sha": "3536e1a2165fa5fdf3ed52a8c4e8095b9ec06f96",
+  "git_sha": "45edfb03d531c95a04a859419e0cf500fc9a70d5",
   "git_dirty": true,
   "steps": [
+    {
+      "step": "m1_m2_baseline",
+      "milestone": "M1 + M2",
+      "command": "scripts/train.py",
+      "config": "configs/model_lgbm.yaml",
+      "status": "ok",
+      "minutes": 0.7,
+      "log": "reports/rebaseline/m1_m2_baseline.log"
+    },
     {
       "step": "m4_calibration_diag",
       "milestone": "M4",
       "command": "scripts/calibration_report.py",
       "config": "configs/calibration.yaml",
       "status": "ok",
-      "minutes": 0.37,
+      "minutes": 0.29,
       "log": "reports/rebaseline/m4_calibration_diag.log"
     },
     {
@@ -17,9 +26,45 @@
       "command": "scripts/calibrate.py",
       "config": "configs/calibration.yaml",
       "status": "ok",
-      "minutes": 0.48,
+      "minutes": 0.34,
       "log": "reports/rebaseline/m4_calibrator.log"
+    },
+    {
+      "step": "m3_compare",
+      "milestone": "M3",
+      "command": "scripts/compare.py",
+      "config": "configs/model_comparison.yaml",
+      "status": "ok",
+      "minutes": 4.7,
+      "log": "reports/rebaseline/m3_compare.log"
+    },
+    {
+      "step": "m3_reverse",
+      "milestone": "M3",
+      "command": "scripts/reverse_validation.py",
+      "config": "configs/model_comparison.yaml",
+      "status": "ok",
+      "minutes": 11.12,
+      "log": "reports/rebaseline/m3_reverse.log"
+    },
+    {
+      "step": "m3_tune",
+      "milestone": "M3",
+      "command": "scripts/tune.py",
+      "config": "configs/tuning.yaml",
+      "status": "ok",
+      "minutes": 7.38,
+      "log": "reports/rebaseline/m3_tune.log"
+    },
+    {
+      "step": "m3_select",
+      "milestone": "M3",
+      "command": "scripts/select_features.py",
+      "config": "configs/feature_selection.yaml",
+      "status": "ok",
+      "minutes": 3.89,
+      "log": "reports/rebaseline/m3_select.log"
     }
   ],
-  "total_minutes": 0.8
+  "total_minutes": 28.4
 }
