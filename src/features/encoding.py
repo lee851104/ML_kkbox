@@ -62,6 +62,18 @@ DEFAULT_SMOOTHING = 100.0
 # OOF 的折數。與 SPEC §4.2 的 5-fold 一致，沒有另立一套。
 DEFAULT_N_SPLITS = 5
 
+# **永遠不得作為正式 target encoding 對象的欄位。**
+#
+# `msno` 是每列一個唯一值的識別碼。對它做 target encoding，每個「類別」的
+# 樣本數都是 1，編碼值等於（平滑後的）該列自己的標籤 —— OOF 也救不了它：
+# 每一折都看不到自己那個 msno，所以每一列都退回先驗，整欄變成常數，
+# 一點資訊都沒有卻讓人以為做了特徵工程。
+#
+# 兩種結局都很糟，而且都不會報錯：naive 編碼把標籤直接餵進模型（E 變體），
+# OOF 編碼則產生一整欄常數。因此把它列成黑名單，由 `assert_not_identifier`
+# 在合規路徑上擋掉。違規對照組要用它是刻意的，走另一條明確標示的路徑。
+IDENTIFIER_COLUMNS: frozenset[str] = frozenset({"msno"})
+
 
 @dataclass(frozen=True)
 class TargetEncoder:
@@ -155,6 +167,54 @@ def oof_target_encode(
         out[apply_idx] = enc.transform(values[apply_idx]).to_numpy()
 
     return pl.Series(f"{values.name}_te", out)
+
+
+def assert_not_identifier(column: str) -> None:
+    """守門：合規的 target encoding 不得作用在唯一識別碼上。
+
+    見 `IDENTIFIER_COLUMNS` 的說明 —— 對 `msno` 做 target encoding，naive 會
+    洩漏標籤、OOF 會產生一整欄常數，兩種都不會報錯。
+
+    ⚠️ 違規對照組（`scripts/target_encoding.py` 的 D、E）刻意需要繞過這條，
+    它們走的是明確標示為「違規」的另一條路徑，且其分數不得進入任何結論。
+
+    Raises:
+        ValueError: 該欄位是唯一識別碼。
+    """
+    if column in IDENTIFIER_COLUMNS:
+        raise ValueError(
+            f"{column!r} 是唯一識別碼，不得作為正式 target encoding 特徵："
+            "naive 編碼會等於該列自己的標籤，OOF 編碼則整欄退回先驗。"
+        )
+
+
+def assert_encoding_aligned(
+    encoded: pl.Series,
+    msno_before: pl.Series,
+    msno_after: pl.Series,
+) -> None:
+    """守門：編碼前後的列順序與 msno 必須逐格對齊。
+
+    編碼是「取一欄、算一欄、貼回去」，而貼回去是**依位置**的。中間只要有
+    一次 sort、filter、join 或 group_by 改動了順序，每個人就會拿到別人的
+    編碼值 —— 列數不變、沒有 null、沒有錯誤訊息，只有分數會變差。
+
+    這與 `_attach_logs` 的 horizontal concat 是同一類問題（§7.11 第二個缺口），
+    所以用同一種方式擋：直接驗證假設本身。
+
+    Raises:
+        AssertionError: 列數不符或 msno 順序改變。
+    """
+    if msno_before.len() != msno_after.len():
+        raise AssertionError(f"編碼前後列數改變：{msno_before.len():,} → {msno_after.len():,}")
+    if encoded.len() != msno_after.len():
+        raise AssertionError(
+            f"編碼欄長度（{encoded.len():,}）與資料列數（{msno_after.len():,}）不符"
+        )
+    if not msno_before.equals(msno_after):
+        raise AssertionError(
+            "編碼前後 msno 順序改變 —— 編碼值是依位置貼回去的，順序一變每個人都會拿到別人的編碼。"
+        )
 
 
 def assert_encoding_is_oof(
