@@ -45,15 +45,28 @@ def _shift_yyyymmdd(yyyymmdd: int, days: int) -> int:
 
 
 def _shift_days_expr(col: str, days: int) -> pl.Expr:
-    """同上，但作用在一整欄上（走真正的日期型別，不是整數運算）。"""
+    """同上，但作用在一整欄上（走真正的日期型別，不是整數運算）。
+
+    ## ⚠️ 為什麼用 strftime 而不是 year*10000 + month*100 + day
+
+    第一版寫成那個算式，實測 20170228 往前 7 天得到 **20169965**（正解
+    20170221，差 **256**）。成因是 **polars 的 `dt.month()` / `dt.day()` 回傳
+    `Int8`**，而 `2 * 100 = 200` 在 Int8（上界 127）裡溢位成 −56：
+
+        2017 * 10000            = 20170000
+        (month 2) * 100 → −56   = 20169944
+        + (day 21)              = 20169965
+
+    **1 月不會出事**（`1 * 100 = 100` 還在界內），所以只用 20170201 當測資的
+    測試會通過 —— 這也是原本的單元測試沒抓到的原因：它測的是 Python 版的
+    `_shift_yyyymmdd`，而這一版一條測試都沒有。
+
+    `dt.strftime("%Y%m%d")` 沒有任何算術，溢位無從發生。
+    """
     shifted = pl.col(col).cast(pl.Int64).cast(pl.String).str.to_date("%Y%m%d") + pl.duration(
         days=days
     )
-    return (
-        (shifted.dt.year() * 10000 + shifted.dt.month() * 100 + shifted.dt.day())
-        .cast(pl.Int64)
-        .alias(col)
-    )
+    return shifted.dt.strftime("%Y%m%d").cast(pl.Int64).alias(col)
 
 
 @dataclass(frozen=True)

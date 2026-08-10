@@ -23,7 +23,7 @@ from src.data import (
     assert_cutoffs_within_window,
     cutoff_window,
 )
-from src.data.cohort import _shift_yyyymmdd
+from src.data.cohort import _shift_days_expr, _shift_yyyymmdd
 from tests.conftest import NODATA
 
 
@@ -41,6 +41,35 @@ def test_yyyymmdd_is_shifted_as_a_date_not_as_an_integer():
     assert _shift_yyyymmdd(20170103, -7) == 20161227
     # 閏年：2016-02-29 存在，所以 3/1 往前 1 天是 2/29 而不是 2/28
     assert _shift_yyyymmdd(20160301, -1) == 20160229
+
+
+@NODATA
+@pytest.mark.parametrize(
+    ("cutoff", "expected"),
+    [
+        (20170201, 20170125),  # 1 月：`month * 100 = 100` 還在 Int8 界內，**不會出事**
+        (20170228, 20170221),  # 2 月：第一版在這裡壞掉（得到 20169965，差 256）
+        (20170301, 20170222),  # 3 月：同上
+        (20161231, 20161224),  # 12 月：溢位最嚴重的月份
+        (20160301, 20160223),  # 閏年
+    ],
+)
+def test_the_column_version_of_the_shift_survives_int8(cutoff, expected):
+    """整欄版的位移必須與 Python 版一致。
+
+    ⚠️ **這條測試存在的原因是它抓到過一個真的 bug。** 第一版寫成
+    `year * 10000 + month * 100 + day`，而 polars 的 `dt.month()` 回傳
+    **Int8** —— `2 * 100 = 200` 溢位成 −56，於是 20170228 往前 7 天得到
+    20169965（差 256）。
+
+    **1 月不會出事**（`1 * 100 = 100` 在界內），所以只用 20170201 當測資會
+    通過。真實資料是靠 `assert_cutoffs_within_window()` 擋下來的 —— 而紅線 1
+    的 `assert_asof_respected()` **通過了**，因為 cutoff 這個基準點自己是垃圾，
+    所有以它為準的檢查都會成立（§7.11 註解裡預言過這個形狀）。
+    """
+    out = pl.DataFrame({"cutoff": [cutoff]}).with_columns(_shift_days_expr("cutoff", -7))
+    assert out["cutoff"][0] == expected
+    assert out["cutoff"][0] == _shift_yyyymmdd(cutoff, -7)
 
 
 @NODATA
