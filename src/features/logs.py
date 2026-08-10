@@ -367,6 +367,19 @@ def build_log_features(
 
     assert_logs_within_cutoff(out)
 
+    # ---- 依 msno 排序，理由與 build_cohort 相同 ----
+    #
+    # 實測（scripts/verify_rebuild.py，2026-08-10）：這張表的列順序**每次
+    # 重建都不同** —— 又一個 group_by。它目前不影響任何分數，因為
+    # `_attach_logs` 是以 cohort 的 msno 為左表 left join，輸出順序跟著左表；
+    # 三輪重建的特徵矩陣指紋完全相同，證明了這件事。
+    #
+    # 那為什麼還要排：**「目前不影響」是一個關於呼叫端的假設，不是關於這張
+    # 表的性質。** `build_log_features()` 是公開 API，任何一個直接拿它的順序
+    # 用（zip、concat、依位置切分）的呼叫端都會踩到 §7.8 那個 bug 的翻版。
+    # 排序的成本是一次 80 萬列的 sort，換掉整類問題。
+    out = out.sort("msno")
+
     out.write_parquet(cache)
     covered = out.height / cutoffs.height
     log(f"  完成 {out.height:,} 列 × {out.width} 欄（覆蓋 {covered:.2%} 的 cohort 用戶）")

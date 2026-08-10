@@ -378,11 +378,30 @@ def _attach_logs(
         pl.DataFrame({"msno": msno})
         .join(logs, on="msno", how="left")
         .with_columns(pl.col("log_has_logs").fill_null(0.0))
-        # `cutoff` 只是出身證明，驗證完就丟 —— 它不是特徵。留著會讓模型看到
-        # 原始日期，而那正是本模組開頭第二條設計決定禁止的事。
-        .drop("msno", "cutoff")
     )
     if joined.height != X.height:
         raise ValueError(f"join 後列數改變（{X.height} → {joined.height}），收聽特徵有重複的 msno")
+
+    # ⚠️ **horizontal concat 是依位置對齊的，不是依 msno。**
+    #
+    # 下面那行 `pl.concat(..., how="horizontal")` 把兩張表並排黏起來：第 i 列
+    # 的交易特徵配第 i 列的收聽特徵。這假設 join 的輸出保持了左表的列順序。
+    #
+    # polars 的 left join 目前確實保持左表順序，但那是實作行為不是契約 ——
+    # 換一個 engine、換一個版本、加一次 streaming，都可能重排。而一旦重排，
+    # **每個人都會拿到別人的收聽特徵**：列數不變、欄位不變、沒有 null、
+    # 沒有任何錯誤，模型照常訓練，分數只是變差。上面那個列數檢查完全看不出來。
+    #
+    # 這比 §7.8 的順序問題嚴重一個等級：那個是「換一批訓練資料」，這個是
+    # 「特徵接錯人」。所以這裡直接驗證假設本身。
+    if (joined["msno"] != msno).any():
+        raise ValueError(
+            "join 之後列順序改變，收聽特徵會接錯用戶。"
+            "horizontal concat 依位置對齊，順序一變每個人都拿到別人的特徵。"
+        )
+
+    # `cutoff` 只是出身證明，驗證完就丟 —— 它不是特徵。留著會讓模型看到
+    # 原始日期，而那正是本模組開頭第二條設計決定禁止的事。
+    joined = joined.drop("msno", "cutoff")
 
     return pl.concat([X, joined], how="horizontal")

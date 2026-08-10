@@ -82,13 +82,26 @@ def three_way_split(feb: FeatureSet, cfg: dict) -> ThreeWaySplit:
 
     先切出 sel，再從剩下的切出 es —— 兩次都分層抽樣。流失率只有 6.39%，
     不分層的話 15% 的小塊裡正例數量會有可觀波動，選參數就開始比運氣。
+
+    ## 切分綁在 msno 上，不綁在列位置上
+
+    `train_test_split` 是**依位置**切的：同一個 seed 餵進不同順序的資料，
+    會切出不同的人。`build_cohort()` 末尾的 `.sort("msno")` 已經讓 cohort
+    的順序固定，但那個保證住在另一個模組裡 —— 任何一次「先 filter 再切」、
+    「join 完忘記排序」、或讀到修正之前的舊快取，都會讓這裡安靜地換一批
+    訓練資料，而分數只動 0.0006 左右，看起來像實驗有了效果。
+
+    因此這裡先自己按 msno 排出一個標準順序再切。cohort 已經排序時這是
+    **恆等變換**（argsort 傳回 0..n-1），所有既有數字不受影響；順序一旦
+    被上游改動，切分結果仍然不變。
     """
-    idx = np.arange(feb.X.height)
+    canonical = feb.msno.arg_sort().to_numpy()
+    y = feb.y.to_numpy()
     rest_idx, sel_idx = train_test_split(
-        idx,
+        canonical,
         test_size=cfg["select_fraction"],
         random_state=cfg["split_seed"],
-        stratify=feb.y.to_numpy(),
+        stratify=y[canonical],
     )
     rest_y = feb.y.to_numpy()[rest_idx]
     tr_idx, es_idx = train_test_split(

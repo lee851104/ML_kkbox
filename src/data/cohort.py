@@ -168,6 +168,45 @@ def assert_cutoffs_within_window(df: pl.DataFrame, spec: CohortSpec) -> None:
         )
 
 
+def assert_rows_reproducible(df: pl.DataFrame) -> None:
+    """守門：列順序必須是可重現的，也就是**依 msno 遞增且無重複**。
+
+    這條補的是「快取過時」而不是「洩漏」—— §7.5 遺留的那一類問題。
+
+    `build_cohort()` 末尾的 `.sort("msno")` 讓每次重建都得到相同的列順序，
+    下游依位置切分的 `train_test_split` 才切得到同一批人。但那個保證只在
+    **重算**的路徑上成立：快取命中時讀進來的是一個 parquet 檔，它可能由
+    修正之前的程式產出。舊快取沒有洩漏（`assert_asof_respected` 與
+    `assert_cutoffs_within_window` 都會通過），只是順序是亂的 —— 於是
+    train / early stopping 換一批人，分數安靜地變動 0.0006 左右，和我們想
+    量的特徵效果同一個量級。
+
+    分數變動不會讓任何檢查失敗，只會讓人以為「這次實驗有效果」。所以這條
+    守門必須跑在快取命中的路徑上，而不只是重算之後。
+
+    Raises:
+        AssertionError: 列順序不是依 msno 遞增，或 msno 有重複。
+    """
+    if "msno" not in df.columns:
+        raise KeyError("缺少檢查所需的欄位 'msno'")
+    if df.height == 0:
+        return
+
+    msno = df["msno"]
+    if not msno.is_sorted():
+        raise AssertionError(
+            "列順序不可重現：本表未依 msno 排序。"
+            '這通常代表快取由 `.sort("msno")` 修正之前的程式產出 —— '
+            "它沒有洩漏，但依位置切分的下游會拿到不同的訓練集。"
+            "請以 force=True 重建。"
+        )
+    if msno.n_unique() != msno.len():
+        raise AssertionError(
+            f"msno 有重複：{msno.len() - msno.n_unique():,} 列。"
+            "cohort 的每位用戶只能一列，重複會讓同一個人同時進到訓練與驗證。"
+        )
+
+
 def build_cohort(
     spec: CohortSpec | str = FEB,
     paths: Paths | None = None,
@@ -213,6 +252,10 @@ def build_cohort(
             # 紅線 1 只檢查「last_tx <= cutoff」，對「這份資料屬於哪個 cohort」
             # 沒有意見。這一行補上那個盲點 —— 見 assert_cutoffs_within_window。
             assert_cutoffs_within_window(cached, spec)
+            # 前兩條驗的是「有沒有洩漏」，這一條驗的是「順序可不可重現」。
+            # 修正之前的舊快取兩條都會通過，只是順序亂的 —— 見
+            # assert_rows_reproducible 的註解。
+            assert_rows_reproducible(cached)
             log(f"讀取快取 {cache.name}（{cached.height:,} 列）")
             return cached
         log(f"快取 {cache.name} 的欄位與目前的 schema 不符，重算")
@@ -316,6 +359,7 @@ def build_cohort(
     # 永遠會跑，不是只在測試裡。洩漏一旦發生，寧可整支爆掉也不要靜靜產出錯的表。
     assert_asof_respected(out)
     assert_cutoffs_within_window(out, spec)
+    assert_rows_reproducible(out)
 
     out.write_parquet(cache)
     log(f"  完成 {out.height:,} 列 × {out.width} 欄，已快取 → {cache.name}")

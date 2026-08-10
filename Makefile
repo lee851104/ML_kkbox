@@ -7,7 +7,7 @@
 #    效果完全相同 —— 本檔案只是那些指令的集中索引。安裝方式見 README。
 
 .DEFAULT_GOAL := help
-.PHONY: help setup data data-all lint format test test-fast test-ci eda features ablation train compare select encode tune reverse calibrate calibrate-fit mlflow clean eval serve
+.PHONY: help setup data data-all lint format test test-fast test-ci eda features ablation train compare select encode tune reverse calibrate calibrate-fit verify-rebuild rebaseline mlflow clean eval serve
 
 help:
 	@echo "可用目標："
@@ -36,6 +36,9 @@ help:
 	@echo ""
 	@echo "  calibrate  M4 校準診斷：reliability diagram + Brier/ECE（約 1 分鐘）"
 	@echo "  calibrate-fit  M4 fit isotonic 校準器 + 校準前後對照（約 2 分鐘）"
+	@echo ""
+	@echo "  verify-rebuild 連續強制重建快取兩次，驗證誰在哪裡完全不變（約 6 分鐘）"
+	@echo "  rebaseline     在固定基準上重跑 M1–M4 並留下完整紀錄（約 65 分鐘）"
 	@echo ""
 	@echo "  mlflow     開啟 MLflow UI 檢視實驗紀錄"
 	@echo "  clean      清除 __pycache__ / .pytest_cache / .ruff_cache"
@@ -129,6 +132,18 @@ calibrate:
 # 最後一列 Mar-oracle 是**故意違規**的洩漏對照組，只當上界，不可上線。
 calibrate-fit:
 	uv run python scripts/calibrate.py
+
+# --- 可重現性 --------------------------------------------------------------
+
+# 連續強制重建 cohort 與收聽特徵，比對「誰在哪裡」。§7.8 的修正加了
+# .sort("msno")，但沒有人驗證過它 —— 這支補上，指紋存到 reports/。
+verify-rebuild:
+	uv run python scripts/verify_rebuild.py --rounds 2
+
+# 在固定基準上重跑 M1–M4，每一步記錄 git SHA / 指令 / 設定 / seed / 耗時。
+# ⚠️ 約 65 分鐘。只想確認快的那幾步用 --quick。
+rebaseline:
+	uv run python scripts/rebaseline.py
 
 mlflow:
 	uv run mlflow ui --backend-store-uri sqlite:///mlflow.db

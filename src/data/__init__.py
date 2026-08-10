@@ -10,6 +10,7 @@ from src.data.cohort import (
     CohortSpec,
     assert_asof_respected,
     assert_cutoffs_within_window,
+    assert_rows_reproducible,
     build_cohort,
     scan_transactions,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "CohortSpec",
     "assert_asof_respected",
     "assert_cutoffs_within_window",
+    "assert_rows_reproducible",
     "build_cohort",
     "scan_transactions",
 ]

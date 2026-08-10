@@ -205,13 +205,22 @@ def train_baseline(
     X_mar, y_mar, _ = to_lgb_arrays(mar)
 
     # ---- Feb 內部切一小塊給 early stopping（Mar 全程不參與訓練）----
-    X_tr, X_es, y_tr, y_es = train_test_split(
-        X_feb,
-        y_feb,
+    #
+    # 切分綁在 msno 上而不是列位置上：train_test_split 依位置切，同一個 seed
+    # 餵進不同順序的資料會切出不同的人。cohort 已由 build_cohort 排序，所以
+    # 下面的 argsort 是恆等變換、不改變任何既有分數；它的作用是讓「順序被
+    # 上游改動」不再等於「換一批訓練資料」。理由詳見
+    # src/models/tuning.py::three_way_split 與 src/data/cohort.py 的
+    # assert_rows_reproducible。
+    canonical = feb.msno.arg_sort().to_numpy()
+    tr_idx, es_idx = train_test_split(
+        canonical,
         test_size=train_cfg["inner_valid_fraction"],
         random_state=train_cfg["inner_split_seed"],
-        stratify=y_feb,
+        stratify=y_feb[canonical],
     )
+    X_tr, y_tr = X_feb[tr_idx], y_feb[tr_idx]
+    X_es, y_es = X_feb[es_idx], y_feb[es_idx]
     log(f"  Feb 內部切分：訓練 {len(y_tr):,} · early stopping {len(y_es):,}")
 
     # ---- 訓練 ----
