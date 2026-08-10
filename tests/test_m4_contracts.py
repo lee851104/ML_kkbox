@@ -248,6 +248,31 @@ def test_the_reason_code_list_records_its_cutoff_definition():
 
 
 @NODATA
+def test_the_dirty_flag_is_captured_before_anything_is_written():
+    """`git_dirty` 必須在寫出任何檔案之前抓。
+
+    圖 14 進 git，而 `plot_reasons()` 會覆寫它 —— 若在輸出段落才抓狀態，
+    這個旗標**永遠是 True**，於是從一個警告退化成一行雜訊：讀者學會忽略它，
+    真正該被擋下的那次（帶著未提交的改動跑）就混了進來。
+
+    用靜態掃描而不是執行一次：這支腳本要訓練 CatBoost，跑一次五分鐘。
+
+    ⚠️ 掃描要跳過註解行 —— 上面那段說明裡就寫著 `plot_reasons()`，不跳過的話
+    測試會抓到自己的文件而不是程式。
+    """
+    src = (REPO_ROOT / "scripts" / "explain.py").read_text(encoding="utf-8")
+    lines = [
+        (i, line) for i, line in enumerate(src.splitlines()) if not line.lstrip().startswith("#")
+    ]
+    main_at = next(i for i, line in lines if line.startswith("def main("))
+    capture = next(i for i, line in lines if "git_sha(), git_dirty()" in line)
+
+    for writer in ("plot_reasons(", ".write_csv(", ".write_text("):
+        first_write = next(i for i, line in lines if i > main_at and writer in line)
+        assert capture < first_write, f"git 狀態在第 {first_write} 行的 {writer} 之後才抓"
+
+
+@NODATA
 def test_rebaseline_runs_the_business_step():
     """`make rebaseline` 宣稱重跑 M1–M4，就必須真的包含 M4 的業務指標。
 

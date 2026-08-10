@@ -296,11 +296,25 @@ def main() -> int:
     )
     args = ap.parse_args()
 
+    # ⚠️ **git 狀態要在寫出任何東西之前抓。**
+    #
+    # 第一版把這兩行放在輸出段落，於是 `git_dirty` 永遠是 True —— 因為圖 14
+    # 進 git，而 `plot_reasons()` 已經先把它改掉了。**這個旗標會自我實現：**
+    # 每一次重跑都報「工作區是髒的」，於是它從一個警告退化成一行雜訊，讀者
+    # 學會忽略它，而真正該被擋下的那次（帶著未提交的改動跑）就混了進來。
+    #
+    # 抓的是「這次執行開始時，程式碼是什麼狀態」—— 那才是「這份名單能不能用
+    # 這個 SHA 回溯」的答案。本次執行自己產生的檔案不算污染。
+    sha, dirty = git_sha(), git_dirty()
+
     try:
         paths = load_paths().ensure()
         biz_cfg = load_configs()
     except (FileNotFoundError, KeyError) as e:
         sys.exit(str(e))
+
+    if dirty:
+        print("⚠️ 工作區有未提交的改動 —— 這份名單無法用 SHA 回溯。")
 
     biz = biz_cfg["business"]
     _, train_cfg = load_adopted_config()
@@ -498,10 +512,6 @@ def main() -> int:
         f"    稽核表已存 → reports/explanations/{audit_path.name}（{audit.height:,} 列，含未呈現）"
     )
 
-    sha, dirty = git_sha(), git_dirty()
-    if dirty:
-        print("\n⚠️ 工作區有未提交的改動 —— 這份名單無法用 SHA 回溯。")
-
     provenance = cache_provenance(paths)
     if provenance["stale"]:
         print(f"⚠️ 這些快取的程式版本指紋與現行程式不符：{provenance['stale']}")
@@ -510,6 +520,8 @@ def main() -> int:
         # --- 這份名單是誰、在什麼時候、用哪一版程式算的 ---
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "git_sha": sha,
+        # 執行**開始時**的工作區狀態（見 main() 開頭）。本次執行自己寫出的
+        # 圖與 CSV 不算污染，否則這個旗標永遠是 True。
         "git_dirty": dirty,
         "configs": ["configs/business.yaml", "configs/model_comparison.yaml"],
         "fingerprints": provenance,
