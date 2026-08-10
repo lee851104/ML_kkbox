@@ -32,6 +32,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -131,10 +132,24 @@ def window_bounds(specs: tuple[CohortSpec, ...]) -> tuple[int, int]:
     它的 90 天窗口下界也跟著往前 —— 少扣這 7 天，`feb_t7` 最早那些人的窗口
     開頭會落在收斂檔之外，於是他們的收聽特徵少算 7 天。那不會報錯：紅線 2
     只檢查非負，缺資料它管不著（這也正是收斂檔把日期範圍寫進檔名的理由）。
+
+    ⚠️ **固定評分日的 spec 不看到期區間。** 那種 cohort 所有人的 cutoff 都是
+    `score_date`，所以窗口是 `[score_date − MAX_WINDOW, score_date]`。用到期區間
+    去推會把上界拉到到期月底（例如 apr_fixed 的 20170430），而那超出資料涵蓋
+    範圍 —— 收斂檔會被命名成一個「看起來更完整」的範圍，實際上多出來的那段
+    一列資料都沒有。
     """
-    lo = min(_to_date(s.expire_start) - timedelta(days=s.lead_days + MAX_WINDOW) for s in specs)
-    hi = max(_to_int(_to_date(s.expire_end) - timedelta(days=s.lead_days)) for s in specs)
-    return _to_int(lo), hi
+
+    def lower(s: CohortSpec) -> date:
+        anchor = _to_date(s.score_date) if s.fixed_score_date else _to_date(s.expire_start)
+        return anchor - timedelta(days=(0 if s.fixed_score_date else s.lead_days) + MAX_WINDOW)
+
+    def upper(s: CohortSpec) -> int:
+        if s.fixed_score_date:
+            return s.score_date
+        return _to_int(_to_date(s.expire_end) - timedelta(days=s.lead_days))
+
+    return _to_int(min(lower(s) for s in specs)), max(upper(s) for s in specs)
 
 
 def assert_logs_within_cutoff(df: pl.DataFrame) -> None:
@@ -190,8 +205,22 @@ def narrow_logs(
     # 一份只為 Feb 收斂過的檔（上界 2017-02-28、只含 Feb 用戶）會被 Mar 的
     # 特徵計算直接沿用，而紅線 2 只檢查非負，缺資料它管不著。
     # 範圍寫進檔名之後，換一組 specs 自然就 miss。
+    #
+    # ⚠️ **日期範圍不夠，因為收斂還會依用戶過濾。**
+    #
+    # 下面的 semi-join 只留 `specs` 的標籤檔裡有的人。加一個新 cohort（M6 的
+    # Kaggle 測試集帶進 907,471 位用戶）時，日期範圍可能**一天都沒變**（apr_fixed
+    # 的評分日正好是 20170331，與原本的上界相同），於是舊檔命中 —— 而那份檔裡
+    # 沒有新用戶的任何一列日誌。症狀是那批人全部變成「近 90 天沒有收聽紀錄」，
+    # 而紅線 2 與欄位檢查都會通過。
+    #
+    # 所以檔名再帶一個**用戶集合的指紋**（標籤檔清單的雜湊）。舊的檔名不帶
+    # 這一段，自然 miss 一次重收斂 —— 那是正確的代價。
     lo, hi = window_bounds(specs)
-    out = paths.interim / f"user_logs_window_{lo}_{hi}.parquet"
+    who = hashlib.sha1("|".join(sorted({s.label_file for s in specs})).encode("utf-8")).hexdigest()[
+        :8
+    ]
+    out = paths.interim / f"user_logs_window_{lo}_{hi}_{who}.parquet"
     if out.exists() and not force:
         log(f"讀取既有的收斂檔 {out.name}")
         return out

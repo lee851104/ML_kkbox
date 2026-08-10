@@ -40,7 +40,7 @@ import yaml
 from sklearn.model_selection import StratifiedKFold, train_test_split
 
 from src.config import REPO_ROOT, Paths, load_paths
-from src.data import FEB, MAR, CohortSpec, build_cohort
+from src.data import FEB, MAR, CohortSpec, assert_labels_are_real, build_cohort
 from src.evaluation import constant_log_loss, log_loss, repeat_vs_new, segment_report
 from src.features import FeatureSet, build_features, build_log_features
 from src.models.candidates import to_lgb_arrays
@@ -133,6 +133,9 @@ def load_cohort_features(
     """
     if train_spec.name == valid_spec.name:
         raise ValueError(f"訓練與驗證不能是同一個 cohort（都是 {train_spec.name}）")
+    # Kaggle 測試集的標籤是佔位值（全 0）。拿它當驗證集會算出一個看起來合理
+    # 而毫無意義的分數 —— 只要 spec 名稱打錯一個字就會發生。
+    assert_labels_are_real(train_spec, valid_spec)
 
     def log(msg: str = "") -> None:
         if verbose:

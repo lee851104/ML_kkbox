@@ -211,6 +211,10 @@ FEATURES: dict[str, FeatureMeta] = {
     "days_since_last_tx": FeatureMeta(G_TENURE, HORIZON_SHIFTED, "距上一筆交易", "天"),
     "days_since_registration": FeatureMeta(G_TENURE, HORIZON_SHIFTED, "註冊至到期日", "天"),
     "n_tx": FeatureMeta(G_TENURE, HORIZON_SHIFTED, "歷史交易筆數", "筆"),
+    # 只有固定評分日的 cohort 有這一欄（M6 的 Kaggle 管線，見 src/data/cohort.py）。
+    # 量測時點標「位移」而不是「到期日」：它量的是**評分日與到期日的距離**，在
+    # 評分當下完全看得到，不是到期日當天才發生的事。
+    "days_to_expire": FeatureMeta(G_TENURE, HORIZON_SHIFTED, "距到期日還有", "天"),
     # 取消紀錄。
     #
     # ⚠️ `last_is_cancel` 是唯一標成「到期日」的特徵 —— 取消常發生在到期日當天，

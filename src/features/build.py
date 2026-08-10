@@ -305,6 +305,29 @@ def build_features(df: pl.DataFrame, logs: pl.DataFrame | None = None) -> Featur
         .alias("gender_code"),
     )
 
+    # ---- 固定評分日的 cohort 多一個特徵：還有幾天到期 ----
+    #
+    # ⚠️ **有 `expire_date` 這一欄才產生它，而那一欄只有固定評分日的 spec 有。**
+    #
+    # 提前固定天數的設計（`cutoff = 到期日 − k`）裡，「還有幾天到期」是常數
+    # （0 或 7），加它只是多一欄零 gain 的特徵。固定評分日（M6 的 Kaggle 管線）
+    # 裡它是 1~30 天，而且**在評分時點看得到**：3/31 那天，一位 4/2 到期與一位
+    # 4/29 到期的用戶處境完全不同，而模型沒有這一欄就分不出來。
+    #
+    # 負值有意義且刻意保留：到期日已經過了而還沒續訂 —— 那是強訊號，不是髒資料。
+    # （`_days_before_cutoff` 擋負值是另一回事，那些欄位的負值代表未來資訊。）
+    if "expire_date" in df.columns:
+        # 從 df 算再接到 X 上（X 是 df.select 的輸出，列順序與長度相同）——
+        # X 本身沒有原始日期欄位，那是本模組第二條設計決定的要求。
+        X = X.with_columns(
+            df.select(
+                (_as_date("expire_date") - _as_date("cutoff"))
+                .dt.total_days()
+                .cast(pl.Float64)
+                .alias("days_to_expire")
+            ).to_series()
+        )
+
     if logs is not None:
         X = _attach_logs(df["msno"], df["cutoff"], X, logs)
 
