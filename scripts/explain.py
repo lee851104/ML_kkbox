@@ -77,7 +77,7 @@ import polars as pl
 import yaml
 
 from src.config import REPO_ROOT, load_paths
-from src.data import FEB, MAR
+from src.data import FEB, MAR, cutoff_definition
 from src.data.cohort import cohort_fingerprint
 from src.evaluation import log_loss, resolve_assumptions, subset_calibration
 from src.explain import (
@@ -106,7 +106,11 @@ matplotlib.rcParams["figure.dpi"] = 110
 
 # 現行 cohort 的 cutoff 定義。M6 的 T−7 版本會是 "expire_date_minus_7d"，
 # 屆時 `last_is_cancel` 的原因碼不可沿用（見模組開頭）。
-CUTOFF_DEFINITION = "expire_date"
+#
+# 由 spec 推導而不是寫死字串：M6 的模型 artifact 也必填這一欄，兩邊各寫一份
+# 的話，字串一旦不一致（`expire_date-7d`）比對這一欄的下游就會靜靜地認為兩份
+# 交付物不同源。
+CUTOFF_DEFINITION = cutoff_definition(MAR)
 
 TOP_K = 3
 OUT_DIR = REPO_ROOT / "reports" / "explanations"

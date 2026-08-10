@@ -8,6 +8,7 @@ from src.features.build import (
     FeatureSet,
     assert_logs_match_cohort,
     build_features,
+    feature_build_fingerprint,
 )
 from src.features.encoding import (
     IDENTIFIER_COLUMNS,
@@ -44,6 +45,7 @@ __all__ = [
     "build_features",
     "build_log_features",
     "expected_log_columns",
+    "feature_build_fingerprint",
     "fit_target_encoder",
     "log_feature_group",
     "narrow_logs",

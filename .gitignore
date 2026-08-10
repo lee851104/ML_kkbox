@@ -12,6 +12,11 @@
 *.h5
 *.pkl
 *.joblib
+# M6 的模型 artifact。二進位、每次重訓都變，git 存不動它；正式位置在
+# data_root/artifacts/（見 src/config.py 的 Paths.artifacts）。要帶去 Docker /
+# HF Spaces 就整個目錄複製過去，用環境變數 MODEL_ARTIFACT 指路。
+*.cbm
+/artifacts/
 
 # === 手冊附錄 A 規則二：Kaggle 憑證 ===
 .kaggle/

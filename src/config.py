@@ -56,6 +56,21 @@ class Paths:
         return self.data_root / "interim"
 
     @property
+    def artifacts(self) -> Path:
+        """訓練好的模型 artifact（M6 的服務載入的東西）。
+
+        **刻意不放在 `interim/`。** 那裡的東西「可以隨時整個刪掉重算」，而
+        artifact 是一件交付物：服務、HF Spaces Demo、Kaggle 推論管線載入的
+        就是它，刪掉等於服務起不來。兩者的生命週期不同，就不該共用一個目錄。
+
+        也不放在 repo 裡：模型檔是二進位、每次重訓都變，git 存不動它
+        （`*.cbm` 已在 .gitignore）。要帶去別的機器（Docker / HF Spaces）就
+        整個目錄複製過去，並用環境變數 `MODEL_ARTIFACT` 指路 ——
+        見 `src/serving/artifact.py`。
+        """
+        return self.data_root / "artifacts"
+
+    @property
     def figures(self) -> Path:
         """圖表。注意這個在 repo 裡面，會進 git（SPEC §7 的 reports/figures/）。"""
         return REPO_ROOT / "reports" / "figures"

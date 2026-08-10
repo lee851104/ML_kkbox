@@ -16,6 +16,7 @@ from src.data.cohort import (
     assert_cutoffs_within_window,
     assert_rows_reproducible,
     build_cohort,
+    cutoff_definition,
     cutoff_window,
     scan_transactions,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "assert_cutoffs_within_window",
     "assert_rows_reproducible",
     "build_cohort",
+    "cutoff_definition",
     "cutoff_window",
     "scan_transactions",
 ]

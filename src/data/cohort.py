@@ -118,6 +118,19 @@ MAR_T7 = CohortSpec("mar_t7", "train_v2.csv", 20170301, 20170331, "2017-04", lea
 COHORTS: dict[str, CohortSpec] = {c.name: c for c in (FEB, MAR, FEB_T7, MAR_T7)}
 
 
+def cutoff_definition(spec: CohortSpec) -> str:
+    """「這個 cohort 的 cutoff 是怎麼定的」的機器可讀字串。
+
+    M5 的名單 manifest 與 M6 的模型 artifact 都必填這一欄（見
+    `scripts/explain.py` 與 `src/serving/artifact.py`）—— 少了它，一個到期日
+    當天評分的模型可以被當成能上線的模型部署出去，而回應看起來完全正常。
+
+    寫成函式而不是兩邊各放一個常數：字串一旦不一致（`expire_date_minus_7d`
+    vs `expire_date-7d`），比對這一欄的下游就會靜靜地認為兩份交付物不同源。
+    """
+    return "expire_date" if not spec.lead_days else f"expire_date_minus_{spec.lead_days}d"
+
+
 def cutoff_window(spec: CohortSpec) -> tuple[int, int]:
     """這個 spec 的 cutoff 實際落在哪個區間 —— 到期區間往前移 `lead_days` 天。"""
     return (

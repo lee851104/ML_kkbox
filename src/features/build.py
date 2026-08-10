@@ -35,6 +35,7 @@ from dataclasses import dataclass
 import polars as pl
 
 from src.features.logs import assert_logs_within_cutoff
+from src.fingerprint import logic_fingerprint
 
 # LightGBM 原生支援的類別特徵。
 #
@@ -308,6 +309,26 @@ def build_features(df: pl.DataFrame, logs: pl.DataFrame | None = None) -> Featur
         X = _attach_logs(df["msno"], df["cutoff"], X, logs)
 
     return FeatureSet(X=X, y=df["is_churn"], msno=df["msno"])
+
+
+def feature_build_fingerprint() -> str:
+    """**這一版特徵轉換**的邏輯指紋（M6 用）。
+
+    與 `cohort_fingerprint()` / `log_features_fingerprint()` 是三件不同的事：
+    那兩個蓋的是「快取是哪一版程式算的」，這個蓋的是**本模組**，也就是
+    「as-of 表 → 特徵矩陣」那一段。
+
+    M6 的服務需要它，因為 artifact 裡的模型是用某一版 `build_features()` 的
+    輸出訓練的，而服務用**現在這一版**把 payload 轉成特徵。兩版不同就是
+    §7.11 的形狀（程式改了、模型還是舊的）—— 欄名與欄數可以完全一樣而語意
+    已經變了（例如某一欄改了缺失的填法），沒有任何東西會抱怨。
+
+    ⚠️ 只涵蓋本模組。收聽特徵那半段的邏輯在 `src.features.logs`，由
+    `log_features_fingerprint()` 負責，artifact 兩個都記。
+    """
+    import src.features.build as _self
+
+    return logic_fingerprint(_self)
 
 
 def assert_logs_match_cohort(msno: pl.Series, cutoff: pl.Series, logs: pl.DataFrame) -> None:

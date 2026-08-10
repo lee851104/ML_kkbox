@@ -20,12 +20,17 @@ dependencies = [
     "xgboost>=2.1",     # M3 三方比較的對照組（需 2.x 的 enable_categorical）
     "catboost>=1.2",    # M3 三方比較；原生 ordered target statistics
     "pandas>=2.2",      # M3 xgboost/catboost 的類別特徵只吃 pandas 的 dtype
+    "fastapi>=0.115",   # M6 /predict 服務（SPEC §7 的 serving 層）
+    "pydantic>=2.9",    # M6 payload 的欄位與型別檢查。fastapi 會帶它進來，但我們
+                        # 直接 import，所以明列（同 numpy 的理由）
+    "uvicorn>=0.30",    # M6 跑 FastAPI 的 ASGI server
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
+    "httpx>=0.27",      # M6 starlette 的 TestClient 需要它才打得出請求
 ]
 
 # 把專案裝成可匯入的套件（editable 模式）。

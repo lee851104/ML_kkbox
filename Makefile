@@ -7,7 +7,7 @@
 #    效果完全相同 —— 本檔案只是那些指令的集中索引。安裝方式見 README。
 
 .DEFAULT_GOAL := help
-.PHONY: help setup data data-all lint format test test-fast test-ci eda features ablation train compare select encode tune reverse calibrate calibrate-fit multi-seed verify-rebuild rebaseline mlflow clean eval explain lead-time serve
+.PHONY: help setup data data-all lint format test test-fast test-ci eda features ablation train compare select encode tune reverse calibrate calibrate-fit multi-seed verify-rebuild rebaseline mlflow clean eval explain lead-time artifact artifact-t7 serve
 
 help:
 	@echo "可用目標："
@@ -47,7 +47,9 @@ help:
 	@echo "  eval       M4 業務指標：期望淨收益曲線 + 敏感度熱圖（約 5 分鐘）"
 	@echo "  explain    M5 投放名單 + SHAP 流失原因碼（約 5 分鐘）"
 	@echo "  lead-time  M6 提前 7 天評分的代價：兩版本共同子集比較（約 20 分鐘）"
-	@echo "  serve      尚未實作，見該目標訊息"
+	@echo "  artifact   M6 匯出模型 artifact（T=0，離線基準，約 5 分鐘）"
+	@echo "  artifact-t7 M6 匯出 T−7 的 artifact —— **能上線的那一個**（約 5 分鐘）"
+	@echo "  serve      M6 起 FastAPI /predict（文件在 /docs）"
 
 # --- 環境與資料 ------------------------------------------------------------
 
@@ -190,7 +192,25 @@ explain:
 lead-time:
 	uv run python scripts/lead_time.py
 
-# 尚未實作的目標明確報錯，不安靜地什麼都不做 —— 一個成功但沒有產出的指令
-# 會讓人以為跑過了。
+# 匯出模型 artifact。服務、HF Spaces Demo、Kaggle 推論管線都載這一份，沒有人
+# 重訓（CatBoost 一次約 4 分鐘）。
+#
+# ⚠️ 預設匯出的是 **T=0** 的版本，那是離線基準、**不可上線**（§4.3）。能上線的
+#    是提前 7 天的那個，也是 configs/serving.yaml 預設載入的那個：
+#
+#        uv run python scripts/export_model.py --lead-days 7
+#
+#    只改了 configs/business.yaml（C_offer / r_save）時加 --reuse，不必重訓。
+artifact:
+	uv run python scripts/export_model.py
+
+artifact-t7:
+	uv run python scripts/export_model.py --lead-days 7
+
+# 起 /predict 服務。載哪一份 artifact 看 configs/serving.yaml（預設 T−7）。
+# 文件在 http://127.0.0.1:8000/docs —— OpenAPI 就是這個服務的說明書。
+#
+# ⚠️ artifact 不存在會**啟動失敗**，不是起一個沒有模型的服務 —— 後者會在第一筆
+#    請求時才壞，而那通常是在別人的 Demo 上。先跑 make artifact-t7。
 serve:
-	@echo "make serve 尚未實作 —— M6（FastAPI /predict）" && exit 1
+	uv run uvicorn src.serving.app:app --host 127.0.0.1 --port 8000

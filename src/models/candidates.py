@@ -48,6 +48,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -84,8 +85,38 @@ class Fitted:
     # 「流失機率多 80%」是錯的；驗證與換算見 `src/explain/attribution.py`。
     shap_values: Callable[[pl.DataFrame], np.ndarray]
 
+    # 把模型本體寫進一個目錄，回傳「載回來需要知道的事」（格式代號與檔名）。
+    #
+    # ⚠️ **存檔走這一層，理由與 SHAP 完全相同。** M6 的服務要載入模型而不是
+    # 每次重訓，最省事的做法是讓 `Fitted` 帶著 booster、存檔端自己 `save_model`
+    # ——但那樣載回來之後還要**再寫一份**上面那張類別轉接表（CatBoost 要
+    # `Pool` 加 `cat_features` 索引…）。兩份轉接遲早分歧，而分歧的症狀是
+    # 「服務的機率與離線的機率不同」：兩邊都不會報錯，只有分數對不上，而沒有
+    # 人會為了一個運作正常的 API 去對照離線分數。
+    #
+    # 所以存與載都留在本模組：`save` 由各 fitter 提供，載回來的路徑
+    # （`load_catboost`）與訓練時共用同一個 `catboost_fitted()`。
+    #
+    # 預設是「不支援」而不是「靜靜地不做事」—— 只有 §7.12 採用的 CatBoost
+    # 實作了存檔，另外兩家在 M6 沒有交付物需要它。
+    save: Callable[[Path], dict[str, Any]] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.save is None:
+            object.__setattr__(self, "save", _cannot_save(self.name))
+
     def top(self, n: int = 12) -> pl.DataFrame:
         return self.importance.head(n)
+
+
+def _cannot_save(name: str) -> Callable[[Path], dict[str, Any]]:
+    def save(_dir: Path) -> dict[str, Any]:
+        raise NotImplementedError(
+            f"{name} 沒有實作存檔。M6 的服務只載入 §7.12 採用的模型"
+            "（src.models.adopted.ADOPTED_MODEL）；換模型時要一併補上這一層。"
+        )
+
+    return save
 
 
 def _importance_frame(features: list[str], gains: dict[str, float]) -> pl.DataFrame:
@@ -309,14 +340,10 @@ def fit_catboost(
     from catboost import CatBoostClassifier, Pool
 
     cat_cols = list(train.categorical)
-
-    def to_frame(fs: FeatureSet | pl.DataFrame):
-        X = fs.X if isinstance(fs, FeatureSet) else fs
-        return X.with_columns([pl.col(c).cast(pl.String) for c in cat_cols]).to_pandas()
-
     cat_idx = [train.X.columns.index(c) for c in cat_cols]
-    train_pool = Pool(to_frame(train), train.y.to_numpy(), cat_features=cat_idx)
-    es_pool = Pool(to_frame(es), es.y.to_numpy(), cat_features=cat_idx)
+
+    def to_pool(fs: FeatureSet) -> Pool:
+        return Pool(_to_catboost_pandas(fs.X, cat_cols), fs.y.to_numpy(), cat_features=cat_idx)
 
     model = CatBoostClassifier(
         **params,
@@ -324,11 +351,81 @@ def fit_catboost(
         early_stopping_rounds=train_cfg["early_stopping_rounds"],
         verbose=False,
     )
-    model.fit(train_pool, eval_set=es_pool, use_best_model=True)
-    best = int(model.get_best_iteration()) + 1
+    model.fit(to_pool(train), eval_set=to_pool(es), use_best_model=True)
+
+    return catboost_fitted(
+        model,
+        feature_names=list(train.X.columns),
+        categorical=train.categorical,
+        best_iteration=int(model.get_best_iteration()) + 1,
+    )
+
+
+# CatBoost 模型在 artifact 目錄裡的檔名，以及載入器的格式代號。
+#
+# 兩個常數放在這裡而不是 serving 那一層：**寫檔的人與讀檔的人必須看同一份
+# 字串**。分成兩邊寫，改了一邊就是「artifact 存在、服務說找不到模型」。
+CATBOOST_MODEL_FILE = "model.cbm"
+CATBOOST_FORMAT = "catboost_cbm"
+
+
+def _to_catboost_pandas(X: pl.DataFrame, cat_cols: list[str]):
+    """CatBoost 的 `Pool` 需要的 pandas 表：類別欄轉字串，-1 自成一類。"""
+    return X.with_columns([pl.col(c).cast(pl.String) for c in cat_cols]).to_pandas()
+
+
+def catboost_fitted(
+    model,
+    *,
+    feature_names: list[str],
+    categorical: tuple[str, ...],
+    best_iteration: int,
+) -> Fitted:
+    """把一個 CatBoost 模型包成 `Fitted` —— **訓練與載入共用這一個函式**。
+
+    抽出來的理由見 `Fitted.save` 的註解：服務端載回模型之後若自己組 `Pool`，
+    類別轉接就有第二份，而分歧的症狀是「線上機率與離線機率不同」，兩邊都不
+    會報錯。
+
+    ## 兩道守門，都是針對「不會報錯的錯」
+
+    **一、欄位順序。** `Pool` 依**位置**認特徵，不依欄名。餵進欄序不同的表
+    不會有任何錯誤，只會得到別的特徵組合算出來的機率。所以每次轉換都比對
+    欄名清單。
+
+    **二、模型自己記得的欄名。** `Pool` 是從 pandas 建的，CatBoost 因此把欄名
+    存進了模型檔。載回來時比對它與 artifact 記錄的清單 —— 這抓的是「artifact
+    的 metadata 與模型檔不是同一次訓練產生的」。
+    """
+    cat_cols = [c for c in categorical if c in feature_names]
+    cat_idx = [feature_names.index(c) for c in cat_cols]
+
+    stored = list(getattr(model, "feature_names_", None) or [])
+    if stored and stored != list(feature_names):
+        raise ValueError(
+            "模型檔裡記錄的特徵欄名與傳入的清單不一致 —— "
+            "這個模型不是用這組特徵訓練的，機率會是別人的。\n"
+            f"  模型：{stored[:5]}…（{len(stored)} 欄）\n"
+            f"  傳入：{list(feature_names)[:5]}…（{len(feature_names)} 欄）"
+        )
+
+    def to_pool(X: pl.DataFrame):
+        from catboost import Pool
+
+        if list(X.columns) != list(feature_names):
+            raise ValueError(
+                "特徵欄位與訓練時不一致，CatBoost 的 Pool 依位置認特徵，"
+                "餵進去不會報錯只會算錯。\n"
+                f"  缺少：{sorted(set(feature_names) - set(X.columns))}\n"
+                f"  多出：{sorted(set(X.columns) - set(feature_names))}\n"
+                # ⚠️ 這一行不可省。集合相同而順序不同時上面兩行都是 []，
+                # 而那正是實際發生過的那個 bug（見 SPEC §7.16 第四點）。
+                f"  只是順序不同：{sorted(X.columns) == sorted(feature_names)}"
+            )
+        return Pool(_to_catboost_pandas(X, cat_cols), cat_features=cat_idx)
 
     def predict(X: pl.DataFrame) -> np.ndarray:
-        return model.predict_proba(Pool(to_frame(X), cat_features=cat_idx))[:, 1]
+        return model.predict_proba(to_pool(X))[:, 1]
 
     def shap_values(X: pl.DataFrame) -> np.ndarray:
         # 走 predict 的同一條轉接（類別欄轉字串 + cat_features 索引）。
@@ -339,9 +436,49 @@ def fit_catboost(
         #
         # `use_best_model=True` 已經讓模型只保留到 best_iteration，所以這裡
         # 不必也不能再指定輪數；歸因與預測必然來自同一棵模型。
-        return model.get_feature_importance(
-            Pool(to_frame(X), cat_features=cat_idx), type="ShapValues"
-        )
+        return model.get_feature_importance(to_pool(X), type="ShapValues")
 
-    gains = dict(zip(train.X.columns, model.get_feature_importance(), strict=True))
-    return Fitted("CatBoost", best, predict, _importance_frame(train.X.columns, gains), shap_values)
+    def save(directory: Path) -> dict[str, Any]:
+        directory.mkdir(parents=True, exist_ok=True)
+        model.save_model(str(directory / CATBOOST_MODEL_FILE))
+        return {"format": CATBOOST_FORMAT, "file": CATBOOST_MODEL_FILE}
+
+    gains = dict(zip(feature_names, model.get_feature_importance(), strict=True))
+    return Fitted(
+        "CatBoost",
+        best_iteration,
+        predict,
+        _importance_frame(list(feature_names), gains),
+        shap_values,
+        save,
+    )
+
+
+def load_catboost(
+    model_file: Path,
+    *,
+    feature_names: list[str],
+    categorical: tuple[str, ...],
+    best_iteration: int,
+) -> Fitted:
+    """從 `.cbm` 載回 §7.12 採用的模型。
+
+    ⚠️ **不指定輪數。** 訓練時 `use_best_model=True` 已經讓模型只保留到
+    best_iteration，存下來的就是那棵樹 —— 載回來再截一次是重複截，而
+    `best_iteration` 在這裡只是記錄（存進 artifact 供回溯），不參與推論。
+    """
+    from catboost import CatBoostClassifier
+
+    model = CatBoostClassifier()
+    model.load_model(str(model_file))
+    return catboost_fitted(
+        model,
+        feature_names=feature_names,
+        categorical=categorical,
+        best_iteration=best_iteration,
+    )
+
+
+# 格式代號 → 載入器。`Fitted.save` 回傳的 `format` 就是這裡的鍵，兩者必須配對，
+# 所以字典留在本模組 —— 服務層不該知道有幾種格式。
+FITTED_LOADERS: dict[str, Callable[..., Fitted]] = {CATBOOST_FORMAT: load_catboost}
