@@ -150,8 +150,24 @@ def make_synthetic_cohort() -> pl.DataFrame:
                 None,
             ],
             "in_members": [True, True, True, False, True, True, True, False],
+            # 稽核欄位（不進特徵矩陣）。u3 刻意帶一個同日衝突：它的
+            # last_is_cancel 在真實管線裡會是 null，這裡保留原值即可 ——
+            # 這張表的用途是餵給下游，不是重現聚合邏輯本身。
+            # 聚合規則另有 tests/test_cohort_aggregation.py 用合成交易驗證。
+            "last_day_n_tx": [1, 1, 1, 2, 1, 1, 1, 1],
+            "last_day_has_conflict": [
+                False,
+                False,
+                False,
+                True,
+                False,
+                False,
+                False,
+                False,
+            ],
         },
         schema_overrides={
+            "last_day_n_tx": pl.UInt32,
             "is_churn": pl.Int64,
             "n_tx": pl.UInt32,
             "city": pl.Int64,
