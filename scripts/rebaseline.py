@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -90,9 +91,35 @@ def run_step(name: str, milestone: str, cmd: list[str], config: str, outdir: Pat
     full = [sys.executable, *cmd]
     print(f"\n{'=' * 78}\n{name}（{milestone}）  {' '.join(cmd)}\n{'=' * 78}", flush=True)
 
+    # ⚠️ **編碼要兩端一起釘死，否則整份 stdout 會靜靜地變成 None。**
+    #
+    # 子行程的輸出接到 pipe 時，Windows 上的 Python 預設用 locale 的 cp950；
+    # 父行程這邊 `text=True` 也用 cp950 解碼。兩邊看似一致，實際上腳本印出的
+    # 某些字元（實測撞到 byte 0x89）在 cp950 裡不合法，讀取執行緒就整個炸掉 ——
+    # 而 `subprocess.run` **不會因此失敗**：returncode 仍是 0，只是 proc.stdout
+    # 變成 None。於是每一步都顯示 ok、每一份 log 都只有一個 "None"，而模型
+    # 確實跑完了幾十分鐘。
+    #
+    # 修法是兩端都指定 utf-8：子行程用 PYTHONIOENCODING，父行程用 encoding。
+    # errors="replace" 是最後一道防線 —— 寧可有幾個字變成 U+FFFD，也不要
+    # 為了一個字元丟掉整份結果。
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+
     t0 = time.perf_counter()
-    proc = subprocess.run(full, capture_output=True, text=True, cwd=REPO_ROOT, check=False)
+    proc = subprocess.run(
+        full,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        cwd=REPO_ROOT,
+        check=False,
+    )
     seconds = time.perf_counter() - t0
+
+    if not proc.stdout:
+        print("  ⚠️ 這一步沒有捕捉到任何 stdout —— 結果無法記錄，請檢查。", flush=True)
 
     log_path.write_text(
         f"$ {' '.join(full)}\n\n{proc.stdout}\n\n--- stderr ---\n{proc.stderr}",

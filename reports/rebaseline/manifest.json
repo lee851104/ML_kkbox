@@ -1,0 +1,25 @@
+{
+  "git_sha": "3536e1a2165fa5fdf3ed52a8c4e8095b9ec06f96",
+  "git_dirty": true,
+  "steps": [
+    {
+      "step": "m4_calibration_diag",
+      "milestone": "M4",
+      "command": "scripts/calibration_report.py",
+      "config": "configs/calibration.yaml",
+      "status": "ok",
+      "minutes": 0.37,
+      "log": "reports/rebaseline/m4_calibration_diag.log"
+    },
+    {
+      "step": "m4_calibrator",
+      "milestone": "M4",
+      "command": "scripts/calibrate.py",
+      "config": "configs/calibration.yaml",
+      "status": "ok",
+      "minutes": 0.48,
+      "log": "reports/rebaseline/m4_calibrator.log"
+    }
+  ],
+  "total_minutes": 0.8
+}
