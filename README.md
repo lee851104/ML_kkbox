@@ -64,7 +64,7 @@ M2 的 Feb cohort 內部 5-fold：**0.08344 ± 0.00028**。與時間外分數的
 
 **參考錨點**（官方私榜最終成績）：🥇 0.07974 ｜ 第 10 名 0.09886 ｜ 第 20 名 0.10834
 
-**Demo**：⬜ 尚未部署（M6 交付，將部署至 Hugging Face Spaces）
+**Demo**：🚧 `/predict` 已可在本機起（`make serve`，見「M6 的第二塊」）；Hugging Face Spaces 尚未部署
 
 ---
 
@@ -946,6 +946,99 @@ T=0 時大量用戶的 `days_since_last_tx` 是 0 或 1（到期日當天那筆�
 
 ---
 
+## M6 的第二塊：`/predict` 與模型 artifact
+
+```bash
+make artifact-t7   # 匯出能上線的那個模型（T−7）
+make serve         # 起服務，文件在 http://127.0.0.1:8000/docs
+```
+
+完整設計記錄見 [SPEC.md §7.16](SPEC.md)。
+
+服務**載入一份存好的模型**，不重訓（CatBoost 一次約 4 分鐘）。同一份 artifact
+之後給 HF Spaces Demo 與 Apr cohort 的 Kaggle 推論管線用，三者不各自訓練 ——
+否則「線上那個模型」與「報告裡那個模型」就只是名字一樣。
+
+### 兩種介面，因為它們回答不同的問題
+
+```bash
+# 一、完整 payload —— 真正的服務介面，不需要任何本機資料
+curl -X POST localhost:8000/predict -H "content-type: application/json" -d '{
+  "features": {"cutoff": 20170221, "n_tx": 13, "first_tx": 20160216, "last_tx": 20170216,
+               "n_cancel_hist": 0, "mean_paid": 149.0, "last_is_cancel": 0,
+               "last_is_auto_renew": 1, "last_actual_amount_paid": 149.0,
+               "last_plan_list_price": 149.0, "last_payment_plan_days": 30,
+               "last_payment_method_id": 41, "city": 13, "bd": 28, "gender": "male",
+               "registered_via": 9, "registration_init_time": 20140215},
+  "logs": {"log30_secs": 120000.0, "log30_active_days": 22.0, "log_has_logs": 1.0}}'
+
+# 二、msno —— 從歷史 cohort 快取取特徵（Demo 與營運查詢用，需本機資料）
+curl -X POST localhost:8000/predict -H "content-type: application/json" \
+     -d '{"msno": "…"}'
+```
+
+回應帶機率、`p > p*` 的投放判斷、每人期望淨收益、Top-3 中文原因碼（含被呈現門檻
+壓下的候選與原因），以及**這個機率是誰算的**：模型、`cutoff_definition`、
+`deployable`、`calibrated`。
+
+### 四個決定，每一個都是在防一種不會報錯的錯
+
+**一、服務端不算特徵。** payload 帶的是 cohort 表的欄位，轉換一律呼叫訓練時那
+一份 `build_features()`。線上／離線不一致最典型的成因就是「服務為了少一個依賴
+自己算一遍 `days_since_last_tx`」—— 而那個坑（`20170301 - 20170228 = 73`）本專案
+已經踩過兩次。測試逐列比對 payload 路徑與 `build_features()` 的輸出，**含 dtype**。
+
+**二、artifact 帶著身分證。** 一個只有 `model.cbm` 的目錄回答不了「這是 T=0 還是
+T−7 的模型」——而那兩個差 18.11%，且只有後者能上線。所以 `cutoff_definition`
+是**必填欄位**，少了它 `save_artifact()` 直接 raise。載入時另外驗三件事：模型檔的
+sha256 與 metadata 相符、模型檔自己記得的欄名與清單相符、**特徵程式的邏輯指紋與
+現行程式相符**（不符就拒絕啟動 —— 模型是舊邏輯算出來的特徵訓練的）。
+
+**三、`p*` 存在 artifact 裡，不在服務端現算。** `p* = C_offer / (r_save × LTV)`，
+而 LTV 來自 cohort 的價格分布 —— 那是一個擬合出來的統計量。服務端只有一位用戶，
+拿他自己的日均單價去算等於每個人有一條自己的門檻線，「名單」這個概念就消失了。
+只改業務假設時用 `--reuse` 重寫 metadata，不必重訓。
+
+**四、匯出完立刻載回來對答案。** 存檔／載入是無損的，所以容差是 **0** 而不是
+「差不多」：同一批列，載回來的模型必須給出逐位元相同的機率。實測前 5,000 列最大
+差 0.0e+00（兩份 artifact 各驗一次）。這條路徑的失效方式是「服務用一個與離線不同
+的模型算分」，而兩邊都不會報錯。
+
+匯出順帶重現了先前的分數：T=0 的 `mar` **0.15367**、T−7 的 `mar_t7` **0.17921**，與
+[§7.12](SPEC.md) / [§7.15](SPEC.md) 逐位相同。
+
+### ⚠️ 測試全綠，第一次打真實 artifact 就 500
+
+    特徵欄位與 artifact 不一致。　缺少：[]　多出：[]　順序是否相同：False
+
+收聽特徵在離線那邊的欄序來自 parquet，在 payload 那邊來自一個 **JSON 物件 ——
+它沒有順序**。而 CatBoost 的 `Pool` 依位置認特徵：欄名一模一樣、型別全對、一欄
+不多一欄不少，只是順序不同，於是每一欄的值都餵給了別的特徵 —— 而模型會回一個
+0~1 的機率、原因碼照樣通順。**沒有那兩道比對，這個 bug 不會報錯。**
+
+修法是依**名字**重排，順序的唯一來源是 artifact。合成資料驗不到它（合成 cohort
+沒有收聽特徵，23 欄的順序天生一致），所以補了一條拿真人走完整條路徑的測試。
+線上／離線等價另外量過：同一位真人，`msno` 介面與完整 payload 介面的機率**逐位元
+相同**，Top-3 原因碼字串完全一致。完整記錄見 [SPEC.md §7.16 第四點](SPEC.md)。
+
+### ⚠️ 兩件回應自己會講、但這裡要先說清楚的事
+
+**`msno` 介面查的是特徵，不是預測。** 機率與 SHAP 每次即時算（[SPEC §7.14](SPEC.md)
+明文禁止查表）。但那份特徵來自一個**固定 cutoff 的歷史快照** —— 真正的部署要以
+「現在」為時點重算，那需要一份線上交易表，本專案沒有。所以每一筆這樣的回應都帶著
+那個 cutoff 與這句警告。
+
+**省略 `logs` 不是中性預設。** 沒給收聽特徵時，模型看到的是「近 90 天完全沒有收聽
+紀錄」（訓練資料裡 18.0% 的人正是這個樣子）—— 那是一個**主張**，不是空值。回應
+因此會警告，而不是安靜地給一個看起來很正常的機率。
+
+### 還沒做的
+
+PSI 漂移監控、`MODEL_CARD.md`、Docker、HF Spaces Demo、Kaggle late submission、
+紅線 4 的 GroupKFold 四段切分。
+
+---
+
 ## 快速開始
 
 > ⚠️ 依 Kaggle 競賽規則，原始資料**不隨 repo 散布**。請依下列步驟自行下載。
@@ -1011,7 +1104,7 @@ make data-all
 make test
 ```
 
-應為 **101 passed · 1 skipped**，約 40 秒（唯一 skip 的是紅線 4，阻塞里程碑為 M6）。資料尚未下載時測試會 skip 而非 fail —— 剛 clone 完 repo 的人不該看到滿螢幕紅字。
+應為 **276 passed · 1 skipped**，約 30 秒（唯一 skip 的是紅線 4，阻塞里程碑為 M6）。資料尚未下載時測試會 skip 而非 fail —— 剛 clone 完 repo 的人不該看到滿螢幕紅字。
 
 `make test-fast` 跳過需掃大檔的測試；`make lint` 跑 ruff 檢查。沒有 make 時對應 `uv run pytest`、`uv run pytest -m "not slow"`、`uv run ruff check .`。
 
@@ -1042,9 +1135,12 @@ make eda
 | `make lead-time` | M6 · 提前 7 天評分的代價（共同子集比較） | 約 15 分鐘 |
 | `make multi-seed` | 配對 multi-seed（8 seed × 3 家） | 約 35 分鐘 |
 | `make verify-rebuild` | 連續強制重建兩次，驗證逐位元一致 | 約 6 分鐘 |
-| `make serve` | M6 | 尚未實作 |
+| `make artifact` | M6 · 匯出模型 artifact（T=0，離線基準） | 約 5 分鐘 |
+| `make artifact-t7` | M6 · 匯出 T−7 的 artifact —— **能上線的那一個** | 約 5 分鐘 |
+| `make serve` | M6 · 起 FastAPI `/predict`（文件在 `/docs`） | 立即 |
 
-尚未實作的目標執行時會**明確報錯並說明屬於哪個里程碑**，不會安靜地什麼都不做。
+`make serve` 需要先有 artifact —— 沒有就**啟動失敗**，不會起一個沒有模型的服務。
+後者會在第一筆請求時才壞，而那通常是在別人的 Demo 上。
 
 ---
 
@@ -1071,7 +1167,8 @@ ML_kkbox/
 │   ├── ✅ tuning.yaml            # M3 隨機搜尋空間
 │   ├── ✅ calibration.yaml       # M4 校準切分（seed 刻意與 tuning.yaml 不同）
 │   ├── ✅ multi_seed.yaml        # 配對 multi-seed 的 8 個 seed（事先固定）
-│   └── ✅ business.yaml          # M4 業務參數（r_save / C_offer / 掃描區間）
+│   ├── ✅ business.yaml          # M4 業務參數（r_save / C_offer / 掃描區間）
+│   └── ✅ serving.yaml           # M6 服務設定（載哪一份 artifact、msno 介面開關）
 ├── ✅ scripts/
 │   ├── ✅ download.py            # Kaggle 下載，內嵌 byte 數契約
 │   ├── ✅ features.py            # M2 收聽行為聚合
@@ -1086,6 +1183,7 @@ ML_kkbox/
 │   ├── ✅ business_value.py      # M4 期望淨收益曲線 + 敏感度熱圖
 │   ├── ✅ explain.py             # M5 投放名單 + Top-3 原因碼 + provenance manifest
 │   ├── ✅ lead_time.py           # M6 提前 7 天評分的代價（共同子集比較）
+│   ├── ✅ export_model.py        # M6 匯出模型 artifact（含載回來對答案）
 │   ├── ✅ multi_seed.py          # 配對 multi-seed（雜訊尺度 + 三家比較）
 │   ├── ✅ verify_rebuild.py      # 連續強制重建，驗證逐位元可重現
 │   └── ✅ rebaseline.py          # 在固定基準上重跑 M1–M4 並留紀錄
@@ -1107,7 +1205,10 @@ ML_kkbox/
 │   ├── ✅ models/compare.py      # 三方比較
 │   ├── ✅ models/selection.py    # null importance
 │   ├── ✅ models/tuning.py       # 隨機搜尋
-│   └── ⬜ serving/               # FastAPI —— M6
+│   ├── ✅ serving/artifact.py    # M6 artifact 的存與載（三道守門）
+│   ├── ✅ serving/payload.py     # M6 payload → 特徵（轉換一律走 build_features）
+│   ├── ✅ serving/score.py       # M6 機率 + 原因碼（與 M5 同一條歸因路徑）
+│   └── ✅ serving/app.py         # M6 FastAPI 路由（/health /model /predict）
 ├── ✅ tests/
 │   ├── ✅ conftest.py            # 共用 fixture，無資料時 skip 而非 fail
 │   ├── ✅ test_data_contract.py  # SPEC §2.3 的 12 條斷言
@@ -1123,6 +1224,7 @@ ML_kkbox/
 │   ├── ✅ test_leakage_audit.py       # 第二次洩漏審查的 6 條守門測試
 │   ├── ✅ test_explain.py        # M5 歸因與句型（含三家 SHAP 形狀慣例、量測時點契約）
 │   ├── ✅ test_lead_time.py      # M6 cutoff 位移（含 Int8 溢位的迴歸測試）
+│   ├── ✅ test_serving.py        # M6 artifact 存載、payload≡build_features、/predict
 │   ├── ✅ test_reverse_validation.py  # 穩健性判定邏輯（σ 門檻）
 │   └── ✅ test_no_leakage.py     # 紅線 1/2/3/5/6/7/8 已實作，僅 4 以 skip 保留（等 M6）
 ├── ✅ notebooks/
@@ -1132,13 +1234,14 @@ ML_kkbox/
 └── ✅ .github/workflows/ci.yml   # ruff + pytest（見下方 CI 的限制）
 ```
 
-`src/serving/` 刻意尚未建立。空的套件目錄是雜訊，等到有東西要放進去時再開。
+`MODEL_CARD.md` 仍未建立。空檔案是雜訊，等到有東西要寫進去時再開 ——
+`src/serving/` 到 M6 才開，同一個理由。
 
 ---
 
 ## CI 驗證了什麼（以及沒驗證什麼）
 
-**CI runner 上沒有原始資料** —— 資料依競賽規則不進 Git。因此 229 條測試裡有 35 條在 CI 上會被跳過。
+**CI runner 上沒有原始資料** —— 資料依競賽規則不進 Git。因此 277 條測試裡有 36 條在 CI 上會被跳過。
 
 ⚠️ **一個全部 skip 的測試套件也會顯示綠燈。** 這跟本專案 [SPEC.md §4.5](SPEC.md) 講的「總分會騙人」是同一類問題：一個看起來成功的數字，底下什麼都沒驗證。
 
