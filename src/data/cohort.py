@@ -82,6 +82,11 @@ EXPECTED_COLUMNS = frozenset(
         "registered_via",
         "registration_init_time",
         "in_members",
+        # 稽核欄位（不進特徵矩陣，見 aggregate_asof）。列在這裡是為了讓
+        # 修正之前產生的舊快取因欄位不符而自動重算 —— 那些快取的
+        # last_* 值是用「隨便挑一筆」算出來的。
+        "last_day_n_tx",
+        "last_day_has_conflict",
     }
 )
 
@@ -101,14 +106,98 @@ def scan_transactions(paths: Paths) -> pl.LazyFrame:
     )
 
 
-def _last(col: str) -> pl.Expr:
-    """cutoff 之前最後一筆交易的某個欄位。
+# cutoff 之前「最後一筆交易」的時點值。這六個與 n_tx / mean_paid 那類聚合
+# 有本質差別：後者對順序免疫，前者需要「哪一筆才算最後一筆」有定義。
+LAST_TX_COLUMNS = (
+    "is_cancel",
+    "is_auto_renew",
+    "actual_amount_paid",
+    "plan_list_price",
+    "payment_plan_days",
+    "payment_method_id",
+)
 
-    用 sort_by("transaction_date").last() 明確指定排序依據，而不是先 sort
-    整張表再靠 group_by 保留順序 —— polars 不保證 group_by 內的列順序，
-    那樣寫在小資料上會對、在大資料上偶爾錯，是最難查的一種 bug。
+
+def _last_unambiguous(col: str, on_last_day: pl.Expr) -> pl.Expr:
+    """最後交易日的取值；同日多筆而該欄位有衝突時給 null。
+
+    ## 為什麼不是 sort_by("transaction_date").last()
+
+    那個寫法假設「最後一筆」有定義。實測 **Feb cohort 有 1.30% 的用戶
+    （12,889 人）在最後交易日當天有多筆交易**，而 transaction_date 只到日，
+    沒有任何欄位能分出它們的先後 —— 誰是「最後一筆」在資料上就是未定義的。
+
+    polars 於是每次重建挑到不同的那一筆：實測兩次重建之間，
+    `last_actual_amount_paid` 有 24 列不同（最大差 1608）、`last_is_cancel`
+    有 19 人翻面。**而 last_is_cancel 佔全模型 35.2% 的 gain。**
+    Mar log loss 因此在 0.15821 ~ 0.15891 之間漂移（0.0007，約 1.5σ）。
+
+    ## 逐欄位判斷，不是整列丟棄
+
+    同日多筆不代表每個欄位都有歧義：一位用戶可能在同一天買了兩筆同方案、
+    同金額的交易，那 `last_plan_list_price` 一點都不模糊；但若其中一筆是
+    取消、另一筆不是，`last_is_cancel` 就真的沒有答案。
+
+    因此規則是逐欄位的：**該欄位在最後交易日的非 null 取值只有一種就保留，
+    有兩種以上就給 null**，讓 LightGBM 走缺失分支。實測衝突範圍：Feb 有
+    0.92% 的用戶 `last_is_cancel` 取值不唯一，其餘欄位更少。
+
+    取 null 而不是取眾數／最大值，是因為後兩者都是在編一個資料沒說的答案。
+    「不知道」是這裡唯一誠實的值，而 LightGBM 原生支援它。
     """
-    return pl.col(col).sort_by("transaction_date").last().alias(f"last_{col}")
+    values = pl.col(col).filter(on_last_day).drop_nulls()
+    # n_unique() <= 1 同時涵蓋兩種情形：唯一值（保留）與全 null（first() 給 null）。
+    return pl.when(values.n_unique() <= 1).then(values.first()).otherwise(None).alias(f"last_{col}")
+
+
+def aggregate_asof(joined: pl.LazyFrame) -> pl.LazyFrame:
+    """每位用戶一列的 as-of 聚合。
+
+    Args:
+        joined: 交易明細，必須already含有每位用戶的 `cutoff` 欄位。
+                **截斷在本函式內做**，呼叫端不需要先 filter。
+
+    Returns:
+        每位用戶一列，含順序無關的聚合、六個 `last_*` 時點值，以及兩個
+        稽核欄位：
+
+            last_day_n_tx          最後交易日當天有幾筆交易（1 = 沒有歧義）
+            last_day_has_conflict  六個 last_* 之中是否有任何一個取值衝突
+
+    稽核欄位**刻意不進特徵矩陣**（`build_features` 用白名單 select）。理由：
+    「這個人的最後一天有沒有衝突」很可能與流失相關（同日多筆常見於改方案、
+    取消後重買），一旦當特徵就是在用一個資料品質瑕疵預測標籤 —— 那會有效，
+    但它學到的是我們的管線而不是用戶行為。留著是為了能回答「這批 null 是
+    哪來的」，不是為了讓模型用。
+
+    抽成獨立函式是為了讓它能被餵合成資料測試 —— 同 `assert_asof_respected`
+    的理由。整段邏輯的正確性完全在「同日多筆時取什麼值」，而那在真實資料上
+    只佔 1.3%，靠跑真實資料是驗不出來的。
+    """
+    # ⚠️ 這一行 filter 就是紅線 1 本身，必須在算最後交易日**之前**。
+    truncated = joined.filter(pl.col("transaction_date") <= pl.col("cutoff"))
+
+    # group_by 內的 max 是「該用戶的」最後交易日，所以這個遮罩自動是逐人的。
+    on_last_day = pl.col("transaction_date") == pl.col("transaction_date").max()
+    conflicts = [pl.col(c).filter(on_last_day).drop_nulls().n_unique() > 1 for c in LAST_TX_COLUMNS]
+
+    return truncated.group_by("msno").agg(
+        # is_churn 與 cutoff 對同一位用戶是常數（來自標籤檔與 cutoff 表的
+        # join），所以 first() 在這裡與順序無關。
+        pl.col("is_churn").first(),
+        pl.col("cutoff").first(),
+        # ---- 順序無關的聚合：不受同日多筆影響 ----
+        pl.len().alias("n_tx"),
+        pl.col("transaction_date").min().alias("first_tx"),
+        pl.col("transaction_date").max().alias("last_tx"),
+        pl.col("is_cancel").sum().alias("n_cancel_hist"),
+        pl.col("actual_amount_paid").mean().alias("mean_paid"),
+        # ---- 時點值：逐欄位判斷歧義 ----
+        *[_last_unambiguous(c, on_last_day) for c in LAST_TX_COLUMNS],
+        # ---- 稽核 ----
+        pl.col("transaction_date").filter(on_last_day).len().alias("last_day_n_tx"),
+        pl.any_horizontal(conflicts).alias("last_day_has_conflict"),
+    )
 
 
 def assert_asof_respected(df: pl.DataFrame) -> None:
@@ -303,28 +392,10 @@ def build_cohort(
     cohort = labels.join(cutoffs, on="msno", how="inner")
     log(f"  標籤 {labels.height:,} 人 → 對得上 cutoff {cohort.height:,} 人")
 
-    # ---- 步驟 2：as-of 聚合 ----
-    # 這一行 filter 就是紅線 1 本身。
-    asof = (
-        tx.join(cohort.lazy(), on="msno", how="inner")
-        .filter(pl.col("transaction_date") <= pl.col("cutoff"))
-        .group_by("msno")
-        .agg(
-            pl.col("is_churn").first(),
-            pl.col("cutoff").first(),
-            pl.len().alias("n_tx"),
-            pl.col("transaction_date").min().alias("first_tx"),
-            pl.col("transaction_date").max().alias("last_tx"),
-            pl.col("is_cancel").sum().alias("n_cancel_hist"),
-            pl.col("actual_amount_paid").mean().alias("mean_paid"),
-            _last("is_cancel"),
-            _last("is_auto_renew"),
-            _last("actual_amount_paid"),
-            _last("plan_list_price"),
-            _last("payment_plan_days"),
-            _last("payment_method_id"),
-        )
-    )
+    # ---- 步驟 2：as-of 聚合（含紅線 1 的截斷）----
+    # 邏輯全在 aggregate_asof 裡，理由見該函式：同日多筆交易時「最後一筆」
+    # 沒有定義，處理方式決定了 35.2% gain 的那個特徵長什麼樣。
+    asof = aggregate_asof(tx.join(cohort.lazy(), on="msno", how="inner"))
 
     # ---- 步驟 3：接上用戶屬性 ----
     # 用 left join 而不是 inner join：實測 11.66% 的 cohort 用戶不在

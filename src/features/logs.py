@@ -228,13 +228,37 @@ def narrow_logs(
     return out
 
 
+# total_secs 換算成整數毫秒的倍率。見 _window_aggs 的說明。
+SECS_SCALE = 1000
+
+
 def _window_aggs(w: int) -> list[pl.Expr]:
-    """單一窗口的聚合式。"""
+    """單一窗口的聚合式。
+
+    ⚠️ **`total_secs` 用整數毫秒相加，不直接對浮點求和。**
+
+    浮點加法不可結合：(a+b)+c 與 a+(b+c) 會差最後幾個位元。polars 的
+    group_by 是平行的，每次重建的分塊方式不保證一樣，於是同一份輸入算出來
+    的 `log90_secs` 每次差約 1e-9。實測（scripts/verify_rebuild.py）三輪重建
+    的收聽特徵內容指紋三個樣，差異全部落在這五個 `*_secs` 欄位上。
+
+    1e-9 秒本身毫無意義，但 LightGBM 的直方圖分箱是有邊界的：一個剛好落在
+    邊界上的值換邊，那棵樹就長得不一樣，early stopping 的停點也跟著變。
+    §7.8 已經因為「重建快取就換一批分數」付過一次代價，這裡不留第二個入口。
+
+    整數加法可交換也可結合，所以毫秒相加的結果與分塊方式無關。毫秒對「聽了
+    多久」這件事遠超過需要的精度：90 天窗口的量級是 10^5 秒。
+
+    其餘四欄是整數計數，本來就沒有這個問題。
+    """
     inside = pl.col("days_before") < w
     return [
         # 有紀錄的天數。注意這不等於 w —— 沒打開 App 的日子不會有列。
         inside.sum().alias(f"log{w}_active_days"),
-        pl.col("total_secs").filter(inside).sum().alias(f"log{w}_secs"),
+        (
+            (pl.col("total_secs").filter(inside) * SECS_SCALE).round().cast(pl.Int64).sum()
+            / SECS_SCALE
+        ).alias(f"log{w}_secs"),
         pl.col("plays").filter(inside).sum().alias(f"log{w}_plays"),
         pl.col("num_100").filter(inside).sum().alias(f"log{w}_completed"),
         pl.col("num_unq").filter(inside).sum().alias(f"log{w}_unq"),

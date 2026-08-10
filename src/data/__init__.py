@@ -6,8 +6,10 @@
 from src.data.cohort import (
     COHORTS,
     FEB,
+    LAST_TX_COLUMNS,
     MAR,
     CohortSpec,
+    aggregate_asof,
     assert_asof_respected,
     assert_cutoffs_within_window,
     assert_rows_reproducible,
@@ -18,8 +20,10 @@ from src.data.cohort import (
 __all__ = [
     "COHORTS",
     "FEB",
+    "LAST_TX_COLUMNS",
     "MAR",
     "CohortSpec",
+    "aggregate_asof",
     "assert_asof_respected",
     "assert_cutoffs_within_window",
     "assert_rows_reproducible",

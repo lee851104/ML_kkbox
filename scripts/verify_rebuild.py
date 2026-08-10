@@ -62,6 +62,24 @@ def members_fingerprint(values) -> str:
     return fingerprint(sorted(pl.Series(values).to_list()))
 
 
+def content_fingerprint(df: pl.DataFrame) -> str:
+    """整張表的**逐位元**指紋 —— 值變了就會變，順序變了也會變。
+
+    ⚠️ 這個指紋是後來才加的，而它的缺席讓第一版驗證得出了錯誤的結論。
+
+    第一版只比 msno 的順序，三輪全綠，看起來「重建不改變任何東西」。實際上
+    `last_actual_amount_paid` 有 24 列在重建之間變了值（最大差 1608）、
+    `last_is_cancel` 有 19 人翻面 —— 順序指紋對這些完全無感，因為每個人
+    還在原來的位置上，只是身上的數字換了。
+
+    `hash_rows` 走的是值的位元表示，所以連 1e-9 的浮點差異都抓得到（收聽
+    特徵的 `log*_secs` 確實有這種差異，來自平行加總的次序）。欄位先排序，
+    避免欄序變動造成假警報。
+    """
+    ordered = df.select(sorted(df.columns))
+    return hashlib.sha256(ordered.hash_rows(seed=0).to_numpy().tobytes()).hexdigest()[:16]
+
+
 def load_split_cfgs() -> dict[str, dict]:
     """所有會切分資料的設定檔，各取一份 split 區段。"""
     import yaml
@@ -102,9 +120,20 @@ def snapshot(paths, cfg, *, force: bool, label: str, with_narrow: bool = False) 
             "cohort_msno_順序": fingerprint(raw["msno"]),
             "收聽特徵_msno_順序": fingerprint(logs["msno"]),
             "特徵矩陣_msno_順序": fingerprint(fs.msno),
+            # 內容指紋才抓得到「人沒動、值變了」—— 見 content_fingerprint。
+            "cohort_內容": content_fingerprint(raw),
+            "收聽特徵_內容": content_fingerprint(logs),
+            "特徵矩陣_內容": content_fingerprint(fs.X),
             "cohort_已排序": bool(raw["msno"].is_sorted()),
+            "同日多筆人數": int(raw["last_day_n_tx"].gt(1).sum()),
+            "有衝突人數": int(raw["last_day_has_conflict"].sum()),
         }
-        print(f"    {raw.height:,} 列 × {fs.X.width} 特徵", flush=True)
+        conflict = out["cohorts"][name]
+        print(
+            f"    {raw.height:,} 列 × {fs.X.width} 特徵　"
+            f"同日多筆 {conflict['同日多筆人數']:,} · 有衝突 {conflict['有衝突人數']:,}",
+            flush=True,
+        )
 
     # ---- 切分：成員名單必須固定 ----
     feb = feature_sets["feb"]
@@ -163,7 +192,14 @@ def compare(rounds: list[dict]) -> bool:
     rows = []
     for other in rounds[1:]:
         for name in base["cohorts"]:
-            for key in ("cohort_msno_順序", "收聽特徵_msno_順序", "特徵矩陣_msno_順序"):
+            for key in (
+                "cohort_msno_順序",
+                "收聽特徵_msno_順序",
+                "特徵矩陣_msno_順序",
+                "cohort_內容",
+                "收聽特徵_內容",
+                "特徵矩陣_內容",
+            ):
                 a, b = base["cohorts"][name][key], other["cohorts"][name][key]
                 rows.append(
                     {"輪次": other["label"], "項目": f"{name}.{key}", "一致": a == b, "指紋": b}
