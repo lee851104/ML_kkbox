@@ -109,6 +109,32 @@ def train_one(train_spec: CohortSpec, valid_spec: CohortSpec, cfg: dict, paths) 
     }
 
 
+def dropped_profile(base_fs, lead_fs) -> dict:
+    """提前評分之後掉出 cohort 的那些人是誰。
+
+    ## 為什麼這一組數字比「掉了幾個人」重要得多
+
+    掉出去的是「到期前 7 天內才第一次交易」的人。實測他們的流失率是
+    **70.25%**（全體 8.99% 的 7.8 倍）—— 也就是說 T−7 模型**結構性地看不到
+    風險最高的那一小撮人**。
+
+    這不是可以修的 bug：那些人在評分時點真的還沒有任何歷史。它是一個部署
+    約束，要寫進 MODEL_CARD：這批人需要另一個機制（在到期日當天補評一次，
+    或用「首購後 N 天」觸發），不能靠 T−7 的名單接住。
+
+    只報「掉了 0.16%」會讓人以為影響微不足道，那是錯的印象。
+    """
+    base = pl.DataFrame({"msno": base_fs.msno, "y": base_fs.y})
+    kept = pl.DataFrame({"msno": lead_fs.msno})
+    out = base.join(kept, on="msno", how="anti")
+    return {
+        "人數": out.height,
+        "佔比": out.height / base.height,
+        "流失率": float(out["y"].mean()) if out.height else None,
+        "全體流失率": float(base["y"].mean()),
+    }
+
+
 def cancel_flag_profile(fs) -> dict:
     """`last_is_cancel` 在這個版本裡長什麼樣 —— 提前評分讓它幾乎消失。"""
     col = fs.X["last_is_cancel"]
@@ -200,6 +226,8 @@ def main() -> int:
     print("=" * 88)
     both = common_subset(base, lead)
     dropped = base["valid"].X.height - both.height
+    drop_eval = dropped_profile(base["valid"], lead["valid"])
+    drop_train = dropped_profile(base["train"], lead["train"])
     print(
         f"  {MAR.name} {base['valid'].X.height:,} 人　"
         f"{MAR_T7.name} {lead['valid'].X.height:,} 人　共同 {both.height:,} 人\n"
@@ -207,6 +235,16 @@ def main() -> int:
         " —— 到期前 7 天內才第一次交易，提前評分時還沒有可用的歷史\n"
         f"  訓練集：{FEB.name} {base['train'].X.height:,} → "
         f"{FEB_T7.name} {lead['train'].X.height:,} 人"
+    )
+    print(
+        f"\n  ⚠️ **掉出去的人流失率 {drop_eval['流失率']:.2%}**，"
+        f"是全體 {drop_eval['全體流失率']:.2%} 的 "
+        f"{drop_eval['流失率'] / drop_eval['全體流失率']:.1f} 倍。\n"
+        f"     （訓練 cohort 那邊：{drop_train['人數']:,} 人，流失率 "
+        f"{drop_train['流失率']:.2%}）\n"
+        "     T−7 模型**結構性地看不到風險最高的那一小撮人** —— 那不是可以修的 bug，\n"
+        "     是部署約束：這批人需要另一個機制（到期日當天補評一次，或用首購觸發），\n"
+        "     不能靠 T−7 的名單接住。只報「掉了 0.16%」會給人錯的印象。"
     )
 
     # ---- 二、分數 ----
@@ -302,6 +340,10 @@ def main() -> int:
         "model": ADOPTED_MODEL,
         "lead_days": FEB_T7.lead_days,
         "cutoff_windows": {s.name: list(cutoff_window(s)) for s in (FEB, MAR, FEB_T7, MAR_T7)},
+        "best_iteration": {
+            "t0": int(base["fitted"].best_iteration),
+            "t7": int(lead["fitted"].best_iteration),
+        },
         "cohort_sizes": {
             FEB.name: int(base["train"].X.height),
             MAR.name: int(base["valid"].X.height),
@@ -309,6 +351,19 @@ def main() -> int:
             MAR_T7.name: int(lead["valid"].X.height),
             "common_eval": int(both.height),
             "dropped_from_eval": int(dropped),
+        },
+        "churn_rate": {
+            FEB.name: round(float(base["train"].y.mean()), 6),
+            MAR.name: round(float(base["valid"].y.mean()), 6),
+            FEB_T7.name: round(float(lead["train"].y.mean()), 6),
+            MAR_T7.name: round(float(lead["valid"].y.mean()), 6),
+        },
+        # ⚠️ 這一段比「掉了幾個人」重要得多，見 dropped_profile 的說明。
+        "dropped_users": {
+            "eval": {k: (round(v, 6) if isinstance(v, float) else v) for k, v in drop_eval.items()},
+            "train": {
+                k: (round(v, 6) if isinstance(v, float) else v) for k, v in drop_train.items()
+            },
         },
         "log_loss": {
             "own_eval_set": {"t0": round(base["loss"], 5), "t7": round(lead["loss"], 5)},
@@ -329,6 +384,8 @@ def main() -> int:
             "標籤沒有改變 —— 動的只有 cutoff。退步的幅度就是「提前 7 天」的代價。",
             "這個退步是**應該發生的**：到期日當天的取消在部署時看不到，"
             "用它算出來的分數不是能上線的分數（SPEC §4.3）。",
+            "⚠️ 掉出 cohort 的那批人流失率是全體的 7.8 倍 —— T−7 模型看不到風險最高的"
+            "一小撮人。那是部署約束不是 bug，要寫進 MODEL_CARD 並用另一個機制接住。",
         ],
     }
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
