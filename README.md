@@ -1032,10 +1032,66 @@ sha256 與 metadata 相符、模型檔自己記得的欄名與清單相符、**�
 紀錄」（訓練資料裡 18.0% 的人正是這個樣子）—— 那是一個**主張**，不是空值。回應
 因此會警告，而不是安靜地給一個看起來很正常的機率。
 
+---
+
+## M6 的第三塊：PSI 漂移監控說「一切正常」，而基準率動了 39.9%
+
+`make drift` 產生（模型從 artifact 載入，**不重訓**）。完整記錄見
+[SPEC.md §7.17](SPEC.md)、圖 [16_drift_psi.png](reports/figures/16_drift_psi.png)、
+資料 [reports/drift.json](reports/drift.json)。
+
+上線之後拿不到標籤 —— `is_churn` 要等到期後 30 天。所以監控只能看輸入與輸出的
+分布。本專案的特殊處是**我們有 Mar 的標籤**，於是可以把「監控看到什麼」與「實際
+發生什麼」並排：
+
+| 監控 | 值 | 慣例判讀 |
+|---|---|---|
+| 特徵 PSI | 59/61 欄 < 0.10 | 穩定 |
+| 分數 PSI | **0.0254** | 穩定 |
+| 名單大小（`p > p*`） | 3.89% → 3.83%（**−1.3%**） | 幾乎沒動 |
+| **實際流失率** | 6.36% → 8.89%（**+39.9%**） | ← 部署時看不到 |
+| **平均預測 vs 實際** | 6.33% vs 8.89%（**低估 28.8%**） | ← 部署時看不到 |
+
+**三個拿得到的監控全部回報「穩定」，而模型的機率低估了將近三成。**
+
+這不是 PSI 沒做對 —— 它定義上就看不到這件事：PSI 比的是特徵與分數的**分布**，
+而這裡發生的是「同一種人、行為變了」。而那正是 §7.10 查明讓校準器失效的那個漂移。
+所以要寫進 `MODEL_CARD.md` 的不是「我們有 PSI 監控」，而是**「PSI 回報穩定不等於
+模型還準」**：基準率得靠標籤到齊後的回測，或一個外生指標（例如當月整體續訂率）接住。
+
+### 先量雜訊地板，再讀 0.1 / 0.25
+
+慣例是「< 0.1 穩定、0.1~0.25 中度、> 0.25 顯著」。這三句話沒有分布假設，也**沒有
+樣本數修正**。所以先把參考期隨機切兩半、算它自己的 PSI（完全沒有漂移時的樣子）：
+
+    p95 = 0.000074
+
+於是分數 PSI 0.0254 是雜訊地板的 **344 倍**，而慣例說「穩定」；61 欄裡 **58 欄**
+超過雜訊地板，而 59 欄落在「穩定」帶。兩件事都對，只是回答不同問題：「變了嗎」
+（49 萬對 49 萬的樣本數下幾乎必然）與「變得重要嗎」。所以報告一律把「幾倍雜訊
+地板」印在「哪一帶」旁邊。
+
+### 三個分箱決定，每一個都對應一種會回報「穩定」的失效
+
+| 決定 | 不這樣做會怎樣 |
+|---|---|
+| 箱界**只從參考期算** | 從當期重新分箱，位移後的資料又被切成等量十箱 → 真實位移回報 PSI ≈ 0 |
+| 旗標欄用**取值**分箱 | `is_free_plan` 的等量分位數產生重複箱界 → 3% → 30% 幾乎看不到 |
+| 缺失**自成一箱** | 丟掉 null → 「缺失率從 0 變成 30%」得到 PSI = 0 |
+
+第一條與紅線 5 是同一類東西：箱界是一個**擬合出來的狀態**。測試餵一份整體位移
+20,000 的資料進去，正確做法得到 PSI > 1，自己重新分箱得到 0。
+
+另外兩件實作上的事：單邊空箱（出現訓練時沒見過的類別、缺失率從 0 變成正的）的
+PSI **大小由 epsilon 決定**，所以標記 `epsilon_floored` 並把 epsilon 記進報告 ——
+而那個旗標差點變成永遠亮著的（結構性空箱要先丟掉，否則 61 欄全亮，同 M5 的
+`git_dirty`）。分數 PSI 的參考期用 Feb 內部的 early stopping 切分而非訓練集的樣本內
+預測，否則「樣本內 vs 樣本外」會混進漂移裡（實測差 −0.0018，兩個都印）。
+
 ### 還沒做的
 
-PSI 漂移監控、`MODEL_CARD.md`、Docker、HF Spaces Demo、Kaggle late submission、
-紅線 4 的 GroupKFold 四段切分。
+`MODEL_CARD.md`、Docker、HF Spaces Demo、Kaggle late submission、紅線 4 的
+GroupKFold 四段切分。
 
 ---
 
@@ -1104,7 +1160,7 @@ make data-all
 make test
 ```
 
-應為 **276 passed · 1 skipped**，約 30 秒（唯一 skip 的是紅線 4，阻塞里程碑為 M6）。資料尚未下載時測試會 skip 而非 fail —— 剛 clone 完 repo 的人不該看到滿螢幕紅字。
+應為 **292 passed · 1 skipped**，約 43 秒（唯一 skip 的是紅線 4，阻塞里程碑為 M6）。資料尚未下載時測試會 skip 而非 fail —— 剛 clone 完 repo 的人不該看到滿螢幕紅字。
 
 `make test-fast` 跳過需掃大檔的測試；`make lint` 跑 ruff 檢查。沒有 make 時對應 `uv run pytest`、`uv run pytest -m "not slow"`、`uv run ruff check .`。
 
@@ -1138,6 +1194,7 @@ make eda
 | `make artifact` | M6 · 匯出模型 artifact（T=0，離線基準） | 約 5 分鐘 |
 | `make artifact-t7` | M6 · 匯出 T−7 的 artifact —— **能上線的那一個** | 約 5 分鐘 |
 | `make serve` | M6 · 起 FastAPI `/predict`（文件在 `/docs`） | 立即 |
+| `make drift` | M6 · PSI 漂移監控報告 + 圖 16（不重訓） | 約 3 分鐘 |
 
 `make serve` 需要先有 artifact —— 沒有就**啟動失敗**，不會起一個沒有模型的服務。
 後者會在第一筆請求時才壞，而那通常是在別人的 Demo 上。
@@ -1184,6 +1241,7 @@ ML_kkbox/
 │   ├── ✅ explain.py             # M5 投放名單 + Top-3 原因碼 + provenance manifest
 │   ├── ✅ lead_time.py           # M6 提前 7 天評分的代價（共同子集比較）
 │   ├── ✅ export_model.py        # M6 匯出模型 artifact（含載回來對答案）
+│   ├── ✅ drift_report.py        # M6 PSI 漂移監控（含雜訊地板與標籤漂移對照）
 │   ├── ✅ multi_seed.py          # 配對 multi-seed（雜訊尺度 + 三家比較）
 │   ├── ✅ verify_rebuild.py      # 連續強制重建，驗證逐位元可重現
 │   └── ✅ rebaseline.py          # 在固定基準上重跑 M1–M4 並留紀錄
@@ -1194,6 +1252,7 @@ ML_kkbox/
 │   ├── ✅ evaluation/calibration.py # M4 校準量測：Brier / reliability / ECE
 │   ├── ✅ evaluation/calibrator.py  # M4 isotonic 校準器（實測後決定不上線）
 │   ├── ✅ evaluation/decision.py    # M4 機率 → 投放決策（p* = C/(r×LTV)），M4/M5 共用
+│   ├── ✅ evaluation/drift.py    # M6 PSI（箱界只從參考期算、缺失自成一箱、雜訊地板）
 │   ├── ✅ explain/attribution.py # M5 逐列 SHAP（含加總恆等式守門）
 │   ├── ✅ explain/reasons.py     # M5 句型 + 語意分組 + 量測時點 + 呈現門檻
 │   ├── ✅ features/build.py      # 無狀態特徵建構（紅線 5）
@@ -1225,11 +1284,12 @@ ML_kkbox/
 │   ├── ✅ test_explain.py        # M5 歸因與句型（含三家 SHAP 形狀慣例、量測時點契約）
 │   ├── ✅ test_lead_time.py      # M6 cutoff 位移（含 Int8 溢位的迴歸測試）
 │   ├── ✅ test_serving.py        # M6 artifact 存載、payload≡build_features、/predict
+│   ├── ✅ test_drift.py          # M6 PSI（箱界來源、旗標欄、缺失箱、雜訊地板）
 │   ├── ✅ test_reverse_validation.py  # 穩健性判定邏輯（σ 門檻）
 │   └── ✅ test_no_leakage.py     # 紅線 1/2/3/5/6/7/8 已實作，僅 4 以 skip 保留（等 M6）
 ├── ✅ notebooks/
 │   └── ✅ eda_01_overview.py     # 僅 EDA，不放訓練邏輯
-├── ✅ reports/figures/           # 15 張圖表（01–07 + 03b 為 EDA，09–11 M4 校準，12–13 M4 業務指標，14 M5 原因碼，15 M6 提前評分）
+├── ✅ reports/figures/           # 16 張圖表（01–07 + 03b 為 EDA，09–11 M4 校準，12–13 M4 業務指標，14 M5 原因碼，15 M6 提前評分，16 M6 漂移監控）
 ├── ✅ reports/explanations/      # M5 的 manifest.json（進 Git）＋ 營運名單與稽核表 CSV（不進 Git，每次重跑）
 └── ✅ .github/workflows/ci.yml   # ruff + pytest（見下方 CI 的限制）
 ```
@@ -1241,7 +1301,7 @@ ML_kkbox/
 
 ## CI 驗證了什麼（以及沒驗證什麼）
 
-**CI runner 上沒有原始資料** —— 資料依競賽規則不進 Git。因此 277 條測試裡有 36 條在 CI 上會被跳過。
+**CI runner 上沒有原始資料** —— 資料依競賽規則不進 Git。因此 293 條測試裡有 36 條在 CI 上會被跳過。
 
 ⚠️ **一個全部 skip 的測試套件也會顯示綠燈。** 這跟本專案 [SPEC.md §4.5](SPEC.md) 講的「總分會騙人」是同一類問題：一個看起來成功的數字，底下什麼都沒驗證。
 
