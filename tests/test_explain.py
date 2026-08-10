@@ -171,7 +171,7 @@ def test_only_risk_increasing_contributions_become_reasons():
 
     assert out["feature"].to_list() == ["log7_secs", "last_is_auto_renew"]
     assert out["rank"].to_list() == [1, 2]
-    assert (out["shap"] > 0).all()
+    assert (out["group_shap"] > 0).all()
 
 
 @NODATA
@@ -208,14 +208,14 @@ def test_grouping_changes_which_reason_wins():
 
     assert plain["feature"][0] == "last_is_auto_renew"
     assert grouped["group"][0] == "收聽量"
-    assert grouped["shap"][0] == pytest.approx(0.6)
+    assert grouped["group_shap"][0] == pytest.approx(0.6)
     # 組內同分時取先出現的那一欄（stable），不隨執行變動。
     assert grouped["feature"][0] == "log7_secs"
 
 
 @NODATA
 def test_group_total_and_representative_contribution_are_different_numbers():
-    """組內可以有反向成員，所以 `shap`（組總和）≠ `feature_shap`（代表欄）。
+    """組內可以有反向成員，所以 `group_shap`（組總和）≠ `feature_shap`（代表欄）。
 
     兩個數字混用會產生一句錯的話：報表若拿組總和當「這一欄的貢獻」，讀者
     會以為代表欄的影響比實際小。
@@ -224,7 +224,7 @@ def test_group_total_and_representative_contribution_are_different_numbers():
     out = top_contributors(attr, _X([[1.0, 2.0, 3.0]]), k=1, groups=GROUPS)
 
     assert out["group"][0] == "收聽量"
-    assert out["shap"][0] == pytest.approx(0.5)
+    assert out["group_shap"][0] == pytest.approx(0.5)
     assert out["feature"][0] == "log7_secs"
     assert out["feature_shap"][0] == pytest.approx(0.8)
 
@@ -555,6 +555,140 @@ def test_add_reasons_marks_but_does_not_filter():
     share = expiry_dated_share(out)
     assert share["受影響人數"] == 1
     assert share["有原因碼的人數"] == 2
+
+
+# ---------------------------------------------------------------------------
+# 呈現門檻：營運看到的與稽核看到的不是同一組句子
+# ---------------------------------------------------------------------------
+
+DISPLAY_FEATURES = ("last_is_cancel", "log14_secs_per_active_day", "log90_active_days")
+
+
+def _display_case(values: list[float]):
+    """一位用戶，三個候選原因，貢獻由呼叫端指定。"""
+    attr = Attribution(DISPLAY_FEATURES, np.array([values], dtype=np.float64), np.array([-2.4]))
+    X = pl.DataFrame(
+        {
+            "last_is_cancel": [1.0],
+            "log14_secs_per_active_day": [790.0],
+            "log90_active_days": [20.0],
+        }
+    )
+    from src.explain import add_reasons
+
+    return add_reasons(top_contributors(attr, X, k=3), X), X
+
+
+@NODATA
+def test_the_relative_floor_suppresses_what_is_not_really_a_reason():
+    """第 2、3 句只有第 1 名的 1% 時，不該並列呈現。
+
+    實測的真實案例（2026-08-10）：
+
+        1. 到期前最後一筆交易是取消          +7.941
+        2. 近 14 天活躍日平均聽歌時間 790 秒  +0.093   ← 第 1 名的 1.2%
+        3. 近 90 天活躍天數 20 天             +0.075   ← 第 1 名的 0.9%
+
+    三句並列，營運會以為三件事都重要。**但被壓下的那兩列仍然留在表上**，
+    帶著 `suppression_reason` —— 刪掉它們，「這個人本來還有第三個理由、只是
+    太弱」這個資訊就永久消失了。
+    """
+    from src.explain import mark_display
+
+    reasons, _ = _display_case([7.941, 0.093, 0.075])
+    out = mark_display(reasons, min_relative=0.05)
+
+    assert out.height == 3, "被壓下的列不可以被刪掉"
+    assert out["displayed"].to_list() == [True, False, False]
+    assert out["relative_to_top"][0] == pytest.approx(1.0)
+    assert out["relative_to_top"][1] == pytest.approx(0.093 / 7.941, rel=1e-6)
+    assert out["suppression_reason"][0] is None
+    assert out["suppression_reason"][1] == "below_relative_floor(0.05)"
+
+
+@NODATA
+def test_a_genuinely_multi_causal_user_keeps_all_three():
+    """三個貢獻量級相近時，一句都不該被壓下 —— 門檻不是「只留第一名」。"""
+    from src.explain import mark_display
+
+    reasons, _ = _display_case([4.369, 3.442, 3.274])
+    out = mark_display(reasons, min_relative=0.05)
+    assert out["displayed"].to_list() == [True, True, True]
+
+
+@NODATA
+def test_suppression_is_always_a_suffix():
+    """不可能出現「第 2 句沒印、第 3 句印了」。
+
+    排名依 `group_shap` 遞減，所以 `relative_to_top` 單調不增。`wide_reasons`
+    依賴這個性質才能不重新編號 —— 若哪天排序規則改了，這條會先失敗。
+    """
+    from src.explain import mark_display
+
+    reasons, _ = _display_case([5.0, 0.2, 0.19])
+    shown = mark_display(reasons, min_relative=0.05)["displayed"].to_list()
+    assert shown == sorted(shown, reverse=True), f"呈現旗標不是後綴：{shown}"
+
+
+@NODATA
+def test_zero_floor_displays_everything():
+    """`--min-relative 0` 要能還原成「全部呈現」，門檻才是可退出的。"""
+    from src.explain import mark_display
+
+    reasons, _ = _display_case([7.941, 0.093, 0.075])
+    assert mark_display(reasons, min_relative=0.0)["displayed"].all()
+
+
+@NODATA
+def test_the_operator_list_shows_only_displayed_reasons():
+    """營運名單只印該印的；被壓下的那些不在這張表上。"""
+    from src.explain import mark_display, wide_reasons
+
+    reasons, _ = _display_case([7.941, 0.093, 0.075])
+    wide = wide_reasons(mark_display(reasons), pl.Series("msno", ["u0"]))
+
+    assert wide["reason_1"][0] == "到期前最後一筆交易是取消"
+    assert wide["reason_2"][0] is None
+    assert wide["reason_3"][0] is None
+
+
+@NODATA
+def test_the_audit_table_keeps_every_candidate_with_the_five_columns():
+    """稽核表要能回答「當時為什麼沒印」，所以五個欄位都必須在。"""
+    from src.explain import AUDIT_COLUMNS, audit_frame, mark_display
+
+    reasons, _ = _display_case([7.941, 0.093, 0.075])
+    audit = audit_frame(mark_display(reasons), pl.Series("msno", ["u0"]))
+
+    for col in ("rank", "group_shap", "relative_to_top", "displayed", "suppression_reason"):
+        assert col in audit.columns
+    assert list(audit.columns) == list(AUDIT_COLUMNS), "稽核表的欄位順序要有單一來源"
+    assert audit.height == 3, "稽核表保留全部候選"
+    assert audit["msno"].to_list() == ["u0"] * 3
+
+
+@NODATA
+def test_audit_frame_refuses_a_table_that_never_went_through_mark_display():
+    """少跑一步就報錯，不要產生一張沒有 displayed 欄的「稽核表」。"""
+    from src.explain import audit_frame
+
+    reasons, _ = _display_case([7.941, 0.093, 0.075])
+    with pytest.raises(KeyError, match="稽核表缺少欄位"):
+        audit_frame(reasons, pl.Series("msno", ["u0"]))
+
+
+@NODATA
+def test_display_impact_reports_the_cost_of_the_floor():
+    """門檻的代價要跟門檻一起報 —— 只報門檻值等於沒說它砍掉了什麼。"""
+    from src.explain import display_impact, mark_display
+
+    reasons, _ = _display_case([7.941, 0.093, 0.075])
+    impact = display_impact(mark_display(reasons, min_relative=0.05))
+
+    assert impact["候選句數"] == 3
+    assert impact["呈現句數"] == 1
+    assert impact["壓下句數"] == 2
+    assert impact["受影響人數"] == 1
 
 
 @NODATA

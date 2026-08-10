@@ -47,6 +47,18 @@ M4 報的最佳投放比例 5.0% 是期望曲線在 `curve.step = 0.002` 的網�
 
 manifest 因此有一個必填欄位 `cutoff_definition`。少了它，這份名單的原因碼被
 拿到 T−7 版本使用時，沒有任何東西會擋。
+
+## 兩份輸出：營運呈現與底層稽核
+
+    targeting_list.csv   每人一列，**只有該呈現的句子**（弱到不像理由的不印）
+    reasons_audit.csv    每人每句一列，**全部候選都在** + 為什麼沒印
+
+分開的理由是它們回答不同的問題。營運要的是「打電話時講什麼」，三句並列會讓人
+以為三件事都重要 —— 而實測第 3 句的貢獻中位數只有第 1 名的 7.5%。稽核要的是
+「當時為什麼沒印」，那就不能刪任何一列。
+
+呈現門檻是 `relative_to_top >= 0.05`（`--min-relative` 可覆寫），它是一個
+**呈現判斷不是統計檢定**，所以門檻值與它壓掉多少都寫進 manifest。
 """
 
 from __future__ import annotations
@@ -69,13 +81,18 @@ from src.data import FEB, MAR
 from src.data.cohort import cohort_fingerprint
 from src.evaluation import log_loss, resolve_assumptions, subset_calibration
 from src.explain import (
+    MIN_RELATIVE_SHARE,
     add_reasons,
     assert_local_accuracy,
     attribute,
+    audit_frame,
+    display_impact,
     expiry_dated_share,
     feature_group,
+    mark_display,
     mean_abs_attribution,
     top_contributors,
+    wide_reasons,
 )
 from src.features.logs import log_features_fingerprint
 from src.fingerprint import read_cache_fingerprint
@@ -93,6 +110,11 @@ CUTOFF_DEFINITION = "expire_date"
 
 TOP_K = 3
 OUT_DIR = REPO_ROOT / "reports" / "explanations"
+
+# 底層稽核表的檔名。營運名單是 targeting_list.csv，兩者刻意不同名 ——
+# 「這個人只有一個理由」與「他的第三個理由太弱所以沒印」是不同的事，
+# 只有稽核表分得出來。
+AUDIT_NAME = "reasons_audit.csv"
 
 
 def git_sha() -> str:
@@ -182,7 +204,7 @@ def top1_groups(reasons: pl.DataFrame) -> pl.DataFrame:
     first = reasons.filter(pl.col("rank") == 1)
     return (
         first.group_by("group")
-        .agg(pl.len().alias("人數"), pl.col("shap").mean().round(4).alias("平均貢獻"))
+        .agg(pl.len().alias("人數"), pl.col("group_shap").mean().round(4).alias("平均貢獻"))
         .sort("人數", descending=True)
         .with_columns((pl.col("人數") / first.height).alias("佔比"))
     )
@@ -259,13 +281,19 @@ def print_samples(wide: pl.DataFrame, n: int) -> None:
             reason = row[f"reason_{i}"]
             if reason is None:
                 continue
-            print(f"    {i}. {reason}　（{row[f'group_{i}']}，貢獻 {row[f'shap_{i}']:+.3f}）")
+            print(f"    {i}. {reason}　（{row[f'group_{i}']}，貢獻 {row[f'group_shap_{i}']:+.3f}）")
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="M5 投放名單與流失原因碼")
     ap.add_argument("--sample", type=int, default=5, help="印幾位用戶的完整 Top-3（預設 5）")
     ap.add_argument("--msno", nargs="*", default=None, help="只解釋這幾位用戶（不受名單門檻限制）")
+    ap.add_argument(
+        "--min-relative",
+        type=float,
+        default=MIN_RELATIVE_SHARE,
+        help=f"呈現門檻：一句原因碼至少要有第 1 名的幾成（預設 {MIN_RELATIVE_SHARE}，0 = 全印）",
+    )
     args = ap.parse_args()
 
     try:
@@ -328,11 +356,12 @@ def main() -> int:
     print(f"  加總恆等式 sigmoid(base + Σshap) vs predict：最大差 {gap:.3e}（容差 1e-06）")
 
     top = top_contributors(attr, X_sel, k=TOP_K, groups=feature_group)
-    reasons = add_reasons(top, X_sel)
+    # 兩層：`add_reasons` 造句與標量測時點，`mark_display` 決定哪幾句呈現。
+    # 後者只加旗標不刪列 —— 稽核表要答得出「當時為什麼沒印」。
+    reasons = mark_display(add_reasons(top, X_sel), min_relative=args.min_relative)
 
     msno_sel = mar.msno[selected]
     p_sel = pred[selected]
-    from src.explain import wide_reasons
 
     wide = (
         wide_reasons(reasons, msno_sel, k=TOP_K)
@@ -351,10 +380,11 @@ def main() -> int:
             *[
                 f"{prefix}_{i}"
                 for i in range(1, TOP_K + 1)
-                for prefix in ("reason", "group", "shap", "expiry_dated")
+                for prefix in ("reason", "group", "group_shap", "expiry_dated")
             ],
         )
     )
+    audit = audit_frame(reasons, msno_sel)
 
     print("\n" + "=" * 88)
     print(f"二、名單樣本（沿名單等距取 {min(args.sample, wide.height)} 位，不是前 N 位）")
@@ -365,8 +395,11 @@ def main() -> int:
     pl.Config.set_tbl_rows(30)
     pl.Config.set_tbl_width_chars(180)
 
-    counts = rank_distribution(reasons, wide.height)
-    grouped_top1 = top1_groups(reasons)
+    # 「每人幾句」與「主要在抓什麼」都問**營運看到的**那些句子，所以先過濾。
+    # 稽核的數字另外報（第四節）—— 兩者分母不同，混用會兩邊都講不清。
+    shown = reasons.filter(pl.col("displayed"))
+    counts = rank_distribution(shown, wide.height)
+    grouped_top1 = top1_groups(shown)
 
     # 分組前後對照：不分組時 Top-1 是哪個特徵，把它映回它所屬的組。
     # 若分組只是靠「組大」取勝，兩張表的排名會明顯不同 —— 這是自我檢查。
@@ -393,19 +426,43 @@ def main() -> int:
         "  差很多則要看是不是大的組靠成員數取勝（見 src/explain/reasons.py 的說明）。"
     )
 
-    print("\n  每人拿到幾句原因碼：")
+    print("\n  每人實際呈現幾句原因碼：")
     print(counts)
 
-    share = expiry_dated_share(reasons)
+    impact = display_impact(reasons)
     print("\n" + "=" * 88)
-    print("四、有多少解釋撐不到 M6 的 T−7 版本")
+    print(f"四、呈現門檻（relative_to_top ≥ {args.min_relative}）壓掉了什麼")
     print("=" * 88)
     print(
-        f"  到期日訊號（last_is_cancel）：{share['到期日訊號句數']:,} / "
+        f"  候選 {impact['候選句數']:,} 句 → 呈現 {impact['呈現句數']:,} 句"
+        f"（壓下 {impact['壓下句數']:,} 句）\n"
+        f"  受影響人數：{impact['受影響人數']:,} 人"
+        f"（{impact['受影響人數比例']:.2%}）—— 他們少一到兩句\n"
+        f"  被壓下句子的相對貢獻中位數：{impact['被壓下句子的相對貢獻中位數']:.2%}"
+        "（相對於該用戶的第 1 名）"
+    )
+    print(
+        "\n  ⚠️ 這是**呈現判斷，不是統計檢定** —— SHAP 沒有提供「這個貢獻顯著嗎」的分布。\n"
+        "     門檻值與它壓掉多少一起寫進 manifest，被壓下的每一句留在稽核表裡，\n"
+        f"     帶著 suppression_reason —— 事後查得出當時為什麼沒印（{AUDIT_NAME}）。"
+    )
+
+    # 到期日訊號的比例分兩份報：營運看到的那些句子、以及全部候選。
+    # 兩者分母不同，答的是不同的問題，任一單獨呈現都會被誤讀。
+    share = expiry_dated_share(shown)
+    share_all = expiry_dated_share(reasons)
+    print("\n" + "=" * 88)
+    print("五、有多少解釋撐不到 M6 的 T−7 版本")
+    print("=" * 88)
+    print(
+        f"  【營運呈現的句子】到期日訊號 {share['到期日訊號句數']:,} / "
         f"{share['原因碼句數']:,} 句（{share['句數比例']:.2%}）\n"
         f"  受影響人數：{share['受影響人數']:,} / {share['有原因碼的人數']:,} 人"
         f"（{share['受影響人數比例']:.2%}）\n"
-        f"  佔 Top-{TOP_K} 貢獻總和：{share['到期日訊號佔 Top-3 貢獻的比例']:.2%}"
+        f"  佔呈現貢獻總和：{share['到期日訊號佔 Top-3 貢獻的比例']:.2%}\n"
+        f"\n  【全部候選（稽核）】句數比例 {share_all['句數比例']:.2%}"
+        f"　受影響人數比例 {share_all['受影響人數比例']:.2%}"
+        f"　佔貢獻總和 {share_all['到期日訊號佔 Top-3 貢獻的比例']:.2%}"
     )
     print(
         "\n  ⚠️ 這是「解釋有多少會消失」的估計，**不是「分數會掉多少」** ——\n"
@@ -427,12 +484,19 @@ def main() -> int:
     print("\n產生圖表...")
     figure = plot_reasons(grouped_top1, share, counts, paths.figures)
 
-    # ---- 輸出 ----
+    # ---- 輸出：營運呈現一份、底層稽核一份 ----
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     csv_path = OUT_DIR / ("targeting_list.csv" if not args.msno else "explained_users.csv")
     wide.write_csv(csv_path)
     digest = hashlib.sha256(csv_path.read_bytes()).hexdigest()[:16]
-    print(f"    名單已存 → reports/explanations/{csv_path.name}（{wide.height:,} 列）")
+    print(f"    營運名單已存 → reports/explanations/{csv_path.name}（{wide.height:,} 列）")
+
+    audit_path = OUT_DIR / AUDIT_NAME
+    audit.write_csv(audit_path)
+    audit_digest = hashlib.sha256(audit_path.read_bytes()).hexdigest()[:16]
+    print(
+        f"    稽核表已存 → reports/explanations/{audit_path.name}（{audit.height:,} 列，含未呈現）"
+    )
 
     sha, dirty = git_sha(), git_dirty()
     if dirty:
@@ -472,6 +536,19 @@ def main() -> int:
             "csv_sha256_16": digest,
             "csv_in_git": False,  # *.csv 在 .gitignore（手冊附錄 A 規則一）
         },
+        # --- 呈現門檻：營運看到的與稽核看到的不是同一組句子 ---
+        #
+        # ⚠️ 這是呈現判斷不是統計檢定，所以門檻值與它的代價都要記下來。少了
+        # 這一段，同一份名單用不同門檻跑出來的兩個 CSV 無法分辨。
+        "display": {
+            "rule": "relative_to_top >= min_relative",
+            "min_relative": args.min_relative,
+            "impact": {k: (round(v, 6) if isinstance(v, float) else v) for k, v in impact.items()},
+            "audit_csv": f"reports/explanations/{audit_path.name}",
+            "audit_csv_sha256_16": audit_digest,
+            "audit_rows": int(audit.height),
+            "audit_columns": list(audit.columns),
+        },
         "attribution": {
             "method": "TreeSHAP（CatBoost 原生 ShapValues）",
             "space": "log-odds",
@@ -479,8 +556,10 @@ def main() -> int:
             "local_accuracy_max_gap": float(f"{gap:.3e}"),
             "grouped": True,
         },
+        # ⚠️ 這一段的數字全部是**營運呈現的那些句子**（`displayed == True`）。
+        # 全部候選的版本另列在 `expiry_dated_all_candidates`，兩者分母不同。
         "reasons": {
-            "n_sentences": int(reasons.height),
+            "n_sentences_displayed": int(shown.height),
             "sentences_per_person": {
                 str(row["句數"]): int(row["人數"]) for row in counts.iter_rows(named=True)
             },
@@ -489,6 +568,9 @@ def main() -> int:
             },
             "expiry_dated": {
                 k: (round(v, 6) if isinstance(v, float) else v) for k, v in share.items()
+            },
+            "expiry_dated_all_candidates": {
+                k: (round(v, 6) if isinstance(v, float) else v) for k, v in share_all.items()
             },
         },
         "targeted_slice_calibration": (
@@ -508,6 +590,10 @@ def main() -> int:
             "則三者全變。",
             "CSV 不進 git，每次 make explain 重新產生。下游不得快取它 ——"
             " M6 的 /predict 要即時算，不是查表。",
+            "兩份 CSV 的用途不同：targeting_list 是營運呈現（只有該印的句子），"
+            f"{AUDIT_NAME} 是稽核（全部候選 + suppression_reason）。"
+            "『這個人只有一個理由』與『他的第三個理由太弱所以沒印』是不同的事，"
+            "只有稽核表分得出來。",
             f"cutoff_definition = {CUTOFF_DEFINITION}。標成到期日訊號的原因碼"
             "（last_is_cancel）不可沿用到 M6 的 T−7 版本，那個版本必須重訓。",
             "SHAP 的單位是 log-odds，不是機率。貢獻 +0.8 不等於流失率多 80%。",

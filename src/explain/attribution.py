@@ -38,9 +38,16 @@ SHAP 的加法性讓分組是**精確的**：組內相加就是該組的總貢�
 貢獻最大的那一欄當代表去造句。分組本身是人的判斷（住在
 `src/explain/reasons.py`），但「相加」這一步沒有近似。
 
-⚠️ 代表欄與組總和是兩個數字，不可混用：組總和 `shap` 是「這個家族一起貢獻
+⚠️ 代表欄與組總和是兩個數字，不可混用：`group_shap` 是「這個家族一起貢獻
 多少」，`feature_shap` 是「代表那一欄自己貢獻多少」。組內可以有反向的成員，
 所以前者不等於後者。
+
+## 這一層不決定「印不印」
+
+`top_contributors()` 挑出候選並排名，就到此為止。哪幾句真的呈現給營運，是
+`src/explain/reasons.py::mark_display()` 的事 —— 分兩層是因為它們的失效方式
+不同：這裡錯了是歸因錯，那裡錯了是呈現太寬鬆或太嚴格，而後者需要能事後稽核
+「當時為什麼沒印」。
 """
 
 from __future__ import annotations
@@ -230,9 +237,9 @@ def top_contributors(
     Returns:
         每列每名次一列：
 
-            row / rank / group / shap / feature / feature_shap / value
+            row / rank / group / group_shap / feature / feature_shap / value
 
-        `shap` 是**該組的總貢獻**，`feature_shap` 是代表那一欄自己的貢獻，
+        `group_shap` 是**該組的總貢獻**，`feature_shap` 是代表那一欄自己的貢獻，
         兩者不相等（組內可以有反向成員）。`value` 是代表那一欄在該列的原始
         特徵值，缺失以 null 呈現 —— 「模型看到的是缺失」本身就是一種理由。
         `row` 是 X 的列位置（0-based），呼叫端自己接 msno。
@@ -284,7 +291,7 @@ def top_contributors(
                     "row": r,
                     "rank": rank,
                     "group": group_names[g],
-                    "shap": float(total),
+                    "group_shap": float(total),
                     "feature": attr.features[rep],
                     "feature_shap": float(attr.values[r, rep]),
                     "value": None if np.isnan(v) else float(v),
@@ -295,7 +302,7 @@ def top_contributors(
         "row": pl.Int64,
         "rank": pl.Int64,
         "group": pl.String,
-        "shap": pl.Float64,
+        "group_shap": pl.Float64,
         "feature": pl.String,
         "feature_shap": pl.Float64,
         "value": pl.Float64,

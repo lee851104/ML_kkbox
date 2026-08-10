@@ -430,6 +430,103 @@ def add_reasons(top: pl.DataFrame, X: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+# 呈現門檻：一句原因碼至少要有第 1 名的這個比例，才值得印給營運看。
+#
+# ## 為什麼需要它
+#
+# 實測（2026-08-10，48,853 人的名單）：第 2 句的貢獻中位數是第 1 名的 60.0%，
+# 第 3 句只有 **7.5%**，而 26.2% 的人的第 3 句低於 5%。具體長相：
+#
+#     1. 到期前最後一筆交易是取消          +7.941
+#     2. 近 14 天活躍日平均聽歌時間 790 秒  +0.093   ← 第 1 名的 1.2%
+#     3. 近 90 天活躍天數 20 天             +0.075   ← 第 1 名的 0.9%
+#
+# 三句並列，營運會以為三件事都重要。**貢獻只有第 1 名 1/20 的東西不是原因，
+# 是四捨五入的殘渣。**
+#
+# ## 為什麼是 0.05
+#
+# 這是一個**呈現判斷，不是統計檢定** —— SHAP 沒有提供「這個貢獻顯著嗎」的
+# 分布。0.05 的選法是「同一份名單裡，被壓下的那些句子讀起來確實不像理由」，
+# 而它的代價是可量的：26.2% 的人少一句。所以它不寫死在別處、也不放進
+# `business.yaml`（那裡的參數會改變 p*，這個不會）—— 用 `--min-relative`
+# 覆寫，並且**寫進 manifest**，讓「這份名單是用哪個門檻呈現的」有答案。
+MIN_RELATIVE_SHARE = 0.05
+
+# 稽核欄位裡「為什麼沒印」的值。null 代表印了。
+SUPPRESSED_BY_FLOOR = "below_relative_floor"
+
+
+def mark_display(
+    reasons: pl.DataFrame, *, min_relative: float = MIN_RELATIVE_SHARE
+) -> pl.DataFrame:
+    """標出每一句該不該呈現給營運，**但不刪任何一列**。
+
+    ## 兩層的分工
+
+        營運呈現    只看 `displayed == True` 的句子（弱到不像理由的不印）
+        底層稽核    保留全部候選 + 為什麼沒印，事後查得出當時的判斷
+
+    刪掉被壓下的列會讓第二件事變成不可能：報表看起來很乾淨，而「這個人本來
+    還有第三個理由、只是太弱」這個資訊消失了。這與 `expiry_dated` 只標註不
+    過濾是同一個原則。
+
+    Args:
+        min_relative: 相對於該用戶第 1 名的門檻。0 代表全部呈現。
+
+    Returns:
+        原表加三欄：
+
+            relative_to_top      `group_shap / 該用戶第 1 名的 group_shap`
+            displayed            要不要印給營運
+            suppression_reason   沒印的原因，印了則為 null
+
+    ⚠️ **被壓下的一定是後綴。** 排名依 `group_shap` 遞減，所以
+    `relative_to_top` 單調不增 —— 不可能出現「第 2 句沒印、第 3 句印了」。
+    因此 `reason_1..3` 只會從尾端變空，不需要重新編號（`wide_reasons`
+    依賴這個性質，`tests/test_explain.py` 釘住它）。
+    """
+    if "group_shap" not in reasons.columns or "rank" not in reasons.columns:
+        raise KeyError("輸入缺少 group_shap / rank 欄，這不像 top_contributors() 的輸出")
+    if min_relative < 0:
+        raise ValueError(f"min_relative 不能為負：{min_relative}")
+
+    top = reasons.filter(pl.col("rank") == 1).select("row", pl.col("group_shap").alias("_top"))
+    out = reasons.join(top, on="row", how="left").with_columns(
+        (pl.col("group_shap") / pl.col("_top")).alias("relative_to_top")
+    )
+    return (
+        out.with_columns(
+            (pl.col("relative_to_top") >= min_relative).alias("displayed"),
+        )
+        .with_columns(
+            pl.when(pl.col("displayed"))
+            .then(None)
+            .otherwise(pl.lit(f"{SUPPRESSED_BY_FLOOR}({min_relative})"))
+            .alias("suppression_reason")
+        )
+        .drop("_top")
+    )
+
+
+def display_impact(reasons: pl.DataFrame) -> dict:
+    """呈現門檻壓掉了多少 —— 門檻的代價要跟門檻一起報。"""
+    if "displayed" not in reasons.columns:
+        raise KeyError("輸入缺少 displayed 欄，請先跑 mark_display()")
+    people = reasons["row"].n_unique()
+    suppressed = reasons.filter(~pl.col("displayed"))
+    return {
+        "候選句數": reasons.height,
+        "呈現句數": int(reasons["displayed"].sum()),
+        "壓下句數": suppressed.height,
+        "受影響人數": suppressed["row"].n_unique(),
+        "受影響人數比例": suppressed["row"].n_unique() / people if people else 0.0,
+        "被壓下句子的相對貢獻中位數": (
+            float(suppressed["relative_to_top"].median()) if suppressed.height else None
+        ),
+    }
+
+
 def expiry_dated_share(reasons: pl.DataFrame) -> dict:
     """這批原因碼有多少撐不到 M6 的 T−7 版本。
 
@@ -459,18 +556,24 @@ def expiry_dated_share(reasons: pl.DataFrame) -> dict:
         # ⚠️ 分母是**被選進 Top-3 的貢獻總和**，不是全部 61 個特徵的貢獻總和。
         # 前者才是「原因碼裡有多少比例來自到期日訊號」；後者是另一個問題。
         "到期日訊號佔 Top-3 貢獻的比例": (
-            float(flagged["shap"].sum() / reasons["shap"].sum())
-            if "shap" in reasons.columns
+            float(flagged["group_shap"].sum() / reasons["group_shap"].sum())
+            if "group_shap" in reasons.columns
             else None
         ),
     }
 
 
 def wide_reasons(reasons: pl.DataFrame, msno: pl.Series, *, k: int = 3) -> pl.DataFrame:
-    """長格式 → 每人一列的 `reason_1..k`，供投放名單 CSV 使用。
+    """長格式 → 每人一列的 `reason_1..k`，**營運呈現用**。
+
+    只帶 `displayed == True` 的句子（若已跑過 `mark_display()`）。被壓下的那些
+    留在長格式的稽核表裡，不在這張表上 —— 這張是給人讀的，那張是給稽核用的。
 
     不足 k 句就留空 —— 補滿等於編造理由（見 `top_contributors` 的說明）。
     """
+    if "displayed" in reasons.columns:
+        reasons = reasons.filter(pl.col("displayed"))
+
     # row 的 dtype 要與 `top_contributors()` 的 Int64 一致，否則 join 會因型別
     # 不符而失敗（`with_row_index` 給的是 UInt32）。
     out = (
@@ -483,8 +586,48 @@ def wide_reasons(reasons: pl.DataFrame, msno: pl.Series, *, k: int = 3) -> pl.Da
             "row",
             pl.col("reason").alias(f"reason_{rank}"),
             pl.col("group").alias(f"group_{rank}"),
-            pl.col("shap").round(4).alias(f"shap_{rank}"),
+            pl.col("group_shap").round(4).alias(f"group_shap_{rank}"),
             pl.col("expiry_dated").alias(f"expiry_dated_{rank}"),
         )
         out = out.join(part, on="row", how="left")
     return out.drop("row")
+
+
+# 稽核表的欄位順序。寫成常數是為了讓 CSV 的欄位順序有單一來源 ——
+# 稽核檔的 schema 一變，下游的比對腳本就會對不上。
+AUDIT_COLUMNS: tuple[str, ...] = (
+    "msno",
+    "rank",
+    "group",
+    "group_shap",
+    "relative_to_top",
+    "displayed",
+    "suppression_reason",
+    "feature",
+    "feature_shap",
+    "value",
+    "reason",
+    "horizon",
+    "expiry_dated",
+)
+
+
+def audit_frame(reasons: pl.DataFrame, msno: pl.Series) -> pl.DataFrame:
+    """長格式的稽核表：**每一句候選都在**，含沒印的與為什麼沒印。
+
+    ⚠️ 唯一不在這裡的是**負貢獻**的特徵 —— 那不是「被壓下」，而是
+    `top_contributors()` 依定義不把「降低風險的因素」當成投放理由（見該函式）。
+    這個區別要留在文件裡，否則稽核者會以為表上就是全部 61 個特徵。
+    """
+    named = (
+        pl.DataFrame({"msno": msno})
+        .with_row_index("row")
+        .with_columns(pl.col("row").cast(pl.Int64))
+    )
+    out = reasons.join(named, on="row", how="left")
+    missing = [c for c in AUDIT_COLUMNS if c not in out.columns]
+    if missing:
+        raise KeyError(
+            f"稽核表缺少欄位 {missing} —— 是不是漏跑了 add_reasons() 或 mark_display()？"
+        )
+    return out.select(AUDIT_COLUMNS).sort("msno", "rank")
