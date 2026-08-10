@@ -11,13 +11,13 @@
 
 ---
 
-> ### 🚧 專案狀態：M0–M3 完成（三度重測後定版），M4 進行中（校準已結案，業務指標待做）
+> ### 🚧 專案狀態：M0–M4 完成（三度重測後定版），下一步 M5 原因碼
 >
 > 已完成：全部 10 個競賽檔案下載並實測、`src/` 全部資料／特徵／模型模組、
 > EDA 與 8 張圖表、M1 baseline、M2 收聽特徵聚合、M3 四個實驗、
 > 一次獨立洩漏審查（7 個問題全數修正）、
 > 一次反向時間外驗證、一次列順序不決定性的修正（兩者都改變過 M3 的結論）、
-> **M4 校準診斷 + isotonic 校準器（實測結論：不上線，見下方）**、
+> **M4 校準診斷 + isotonic 校準器（結論：不上線）+ 期望淨收益曲線與敏感度熱圖**、
 > **兩次獨立洩漏審查（7 + 6 個問題全數修正）**、
 > 測試 **159 passed · 1 skipped**（僅紅線 4 待 M6）、Makefile、GitHub Actions CI。
 >
@@ -51,7 +51,8 @@
 | M1 | LightGBM（交易 + 用戶屬性，23 特徵） | **0.15925** | **−48.2% vs 基準** | ✅ 已重測 |
 | M2 | ＋ 收聽行為聚合特徵（+38 特徵，共 61） | **0.15705** | **−1.38% vs M1** | ✅ 已重測 |
 | M3 | **CatBoost**（四個實驗只有換套件通過驗證） | **0.15367** | **−2.16% vs LightGBM** | ✅ 已重測 |
-| M4 | ＋ isotonic 機率校準 | **0.17172**（未校準同源 0.15645） | **+9.8%** | ⛔ **實測後決定不上線**，見下方「M4 的發現」 |
+| M4 校準 | ＋ isotonic 機率校準 | **0.17172**（未校準同源 0.15645） | **+9.8%** | ⛔ **實測後決定不上線**，見「M4 的發現」 |
+| **M4 業務指標** | 期望淨收益曲線（用 CatBoost） | — | **最佳投放 5.0%** | ✅ **核心交付物已產出**，見「M4 的業務指標」 |
 | M6 | 部署版（提前 7 天預測） | — | — | ⬜ |
 
 M2 的 Feb cohort 內部 5-fold：**0.08344 ± 0.00028**。與時間外分數的差距見下方「M1 的發現」。
@@ -717,6 +718,76 @@ fit 在 Feb-sel 上，那條反轉在 Feb-sel 上並不存在。方法選得再�
 
 ---
 
+## M4 的業務指標：核心交付物
+
+`make eval` 產生。實作見 [src/evaluation/decision.py](src/evaluation/decision.py)，
+完整記錄見 [SPEC.md §7.13](SPEC.md)。
+
+    E[淨收益] = p_churn × r_save × LTV_saved − C_offer
+
+**決策只取決於一個數字**：`p* = C_offer / (r_save × LTV)`。三個參數的不確定性
+因此互相吸收 —— LTV 打三折等於 C_offer 乘 3.33，兩者在敏感度熱圖上是同一個
+方向的移動。
+
+### LTV 由資料推，只有「續訂月數」是假設
+
+| 項目 | 值 | 來源 |
+|---|---|---|
+| 月費（Mar 實付平均） | **131.3 元** | 資料實測 |
+| 預期續訂月數 | **15.6 個月** | 1 / Feb 流失率 6.39% |
+| **LTV_saved** | **2,054 元** | 相乘 |
+| r_save | 15% | **純假設** |
+| C_offer | 150 元 | **業務決策**（送一個月免費） |
+
+**門檻 p\* = 0.4868。**
+
+⚠️ 續訂月數用 **Feb** 的流失率而不是 Mar 的 —— Mar 是評估集的標籤，拿它設
+業務常數等於用到答案。
+
+### 最佳投放門檻
+
+| | 投放比例 | 人數 | 期望淨收益 | 實際結算 | 命中率 | lift |
+|---|---|---|---|---|---|---|
+| **依期望曲線**（部署時唯一能用的） | **5.0%** | 48,548 | 4,962,931 | **5,535,298** | 85.69% | 9.53 |
+| 事後最佳（只能回顧） | 7.4% | 71,851 | — | 5,792,753 | — | — |
+
+**低估的價格：257,456 元** —— 模型低估流失風險 27%，期望曲線因此比實際悲觀，
+極大值往左偏，**該投放的人被判定為不值得投放**。這正是 [SPEC.md §6.1](SPEC.md)
+早就預告的方向，現在它是一個金額。
+
+### 模型不只是學會「新客風險高」
+
+這是 [SPEC.md §4.5](SPEC.md) 第 3 點要求檢驗的事，現在有數字：
+
+| 策略 | 投放人數 | 實際淨收益 |
+|---|---|---|
+| **模型排序前 5.0%** | 48,548 | **+5,535,298 元** |
+| 規則：全部投給新進用戶（不需模型） | 89,266 | **−2,432,833 元** |
+
+**那條規則是虧錢的。** 新進用戶整體流失率 39.84%，但門檻是 48.68% —— 平均而言
+他們達不到門檻，整批投放必然虧損。模型的價值在於**能在群內排序**：重複用戶
+的最佳投放比例 3.2%（lift 15.08）、新進用戶 22.4%（lift 2.07），兩群各自都有
+正收益區間。
+
+### 敏感度：48 組假設裡 42 組為正
+
+最佳投放比例從 0%（r_save 5% 且 C_offer ≥ 250，門檻高到沒人達標）到 24.5%
+（r_save 30% 且 C_offer 10）。
+
+**「多數情況不該大規模投放」本身就是結論**，不是參數沒調好。基準情境的最佳
+比例只有 5%；C_offer 改成 50（折價券而非免費月）會變成 16.2% —— 那是**業務
+決策**改變了答案，不是模型變好了。
+
+### 讀這張圖必須同時知道的三件事
+
+1. **所有金額用未校準機率算，系統性偏低約 27%**（方向已知，見「M4 的發現」）。
+2. **`r_save` 是純假設** —— 本資料集沒有實驗組，無法驗證投放是否真的改變行為。
+   整條曲線是「若 r_save = 15% 則⋯」。
+3. **續訂月數的估計偏樂觀** —— 被挽回的是特意挑出的高風險用戶，往後的流失
+   風險高於平均。
+
+---
+
 ## 快速開始
 
 > ⚠️ 依 Kaggle 競賽規則，原始資料**不隨 repo 散布**。請依下列步驟自行下載。
@@ -808,7 +879,10 @@ make eda
 | `make reverse` | 反向時間外驗證 Mar→Feb | 約 12 分鐘 |
 | `make calibrate` | M4 · 校準診斷（不 fit 任何校準器） | 約 1 分鐘 |
 | `make calibrate-fit` | M4 · fit isotonic 校準器 + 前後對照 | 約 2.5 分鐘 |
-| `make eval` / `make serve` | M4 業務指標 / M6 | 尚未實作 |
+| `make eval` | M4 · 期望淨收益曲線 + 敏感度熱圖 | 約 5 分鐘 |
+| `make multi-seed` | 配對 multi-seed（8 seed × 3 家） | 約 35 分鐘 |
+| `make verify-rebuild` | 連續強制重建兩次，驗證逐位元一致 | 約 6 分鐘 |
+| `make serve` | M6 | 尚未實作 |
 
 尚未實作的目標執行時會**明確報錯並說明屬於哪個里程碑**，不會安靜地什麼都不做。
 
@@ -835,7 +909,9 @@ ML_kkbox/
 │   ├── ✅ model_comparison.yaml  # M3 三方比較（含「公平比較」的定義）
 │   ├── ✅ feature_selection.yaml # M3 null importance
 │   ├── ✅ tuning.yaml            # M3 隨機搜尋空間
-│   └── ✅ calibration.yaml       # M4 校準切分（seed 刻意與 tuning.yaml 不同）
+│   ├── ✅ calibration.yaml       # M4 校準切分（seed 刻意與 tuning.yaml 不同）
+│   ├── ✅ multi_seed.yaml        # 配對 multi-seed 的 8 個 seed（事先固定）
+│   └── ✅ business.yaml          # M4 業務參數（r_save / C_offer / 掃描區間）
 ├── ✅ scripts/
 │   ├── ✅ download.py            # Kaggle 下載，內嵌 byte 數契約
 │   ├── ✅ features.py            # M2 收聽行為聚合
@@ -846,13 +922,18 @@ ML_kkbox/
 │   ├── ✅ target_encoding.py     # M3 紅線 6 對照（含刻意違規的控制組）
 │   ├── ✅ tune.py                # M3 隨機搜尋
 │   ├── ✅ calibration_report.py  # M4 校準診斷（刻意不 fit 任何校準器）
-│   └── ✅ calibrate.py           # M4 校準器 + 前後對照（含洩漏對照組）
+│   ├── ✅ calibrate.py           # M4 校準器 + 前後對照（含洩漏對照組）
+│   ├── ✅ business_value.py      # M4 期望淨收益曲線 + 敏感度熱圖
+│   ├── ✅ multi_seed.py          # 配對 multi-seed（雜訊尺度 + 三家比較）
+│   ├── ✅ verify_rebuild.py      # 連續強制重建，驗證逐位元可重現
+│   └── ✅ rebaseline.py          # 在固定基準上重跑 M1–M4 並留紀錄
 ├── ✅ src/
 │   ├── ✅ config.py              # 路徑設定，全專案唯一來源
 │   ├── ✅ data/cohort.py         # as-of 截斷（紅線 1）＋ 守門檢查
 │   ├── ✅ evaluation/metrics.py  # log loss（紅線 8）＋ 分群回報 ＋ AUC
 │   ├── ✅ evaluation/calibration.py # M4 校準量測：Brier / reliability / ECE
 │   ├── ✅ evaluation/calibrator.py  # M4 isotonic 校準器（實測後決定不上線）
+│   ├── ✅ evaluation/decision.py    # M4 機率 → 投放決策（p* = C/(r×LTV)）
 │   ├── ✅ features/build.py      # 無狀態特徵建構（紅線 5）
 │   ├── ✅ features/logs.py       # 收聽行為聚合（紅線 2）
 │   ├── ✅ features/encoding.py   # OOF target encoding（紅線 6）
@@ -870,13 +951,17 @@ ML_kkbox/
 │   ├── ✅ test_selection.py      # M3 的純邏輯測試
 │   ├── ✅ test_calibration.py    # M4 校準量測的純邏輯測試（分箱的失效條件）
 │   ├── ✅ test_calibrator.py     # M4 校準器的純邏輯測試（零區塊下界、同分代價）
+│   ├── ✅ test_decision.py       # M4 決策層（門檻恆等式、低估→門檻過保守）
+│   ├── ✅ test_determinism.py    # 重建順序與切分綁 msno 的迴歸測試
+│   ├── ✅ test_cohort_aggregation.py # 同日多筆交易的逐欄位歧義處理
+│   ├── ✅ test_encoding_leakage.py   # 紅線 6 的四項洩漏迴歸測試
 │   ├── ✅ test_leakage_regressions.py # 第一次洩漏審查的 7 條迴歸測試
 │   ├── ✅ test_leakage_audit.py       # 第二次洩漏審查的 6 條守門測試
 │   ├── ✅ test_reverse_validation.py  # 穩健性判定邏輯（σ 門檻）
 │   └── ✅ test_no_leakage.py     # 紅線 1/2/3/5/6/7/8 已實作，僅 4 以 skip 保留（等 M6）
 ├── ✅ notebooks/
 │   └── ✅ eda_01_overview.py     # 僅 EDA，不放訓練邏輯
-├── ✅ reports/figures/           # 11 張圖表（01–08 EDA，09–11 M4 校準）
+├── ✅ reports/figures/           # 13 張圖表（01–08 EDA，09–11 M4 校準，12–13 M4 業務指標）
 └── ✅ .github/workflows/ci.yml   # ruff + pytest（見下方 CI 的限制）
 ```
 
