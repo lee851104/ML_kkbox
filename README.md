@@ -961,7 +961,7 @@ ML_kkbox/
 │   └── ✅ test_no_leakage.py     # 紅線 1/2/3/5/6/7/8 已實作，僅 4 以 skip 保留（等 M6）
 ├── ✅ notebooks/
 │   └── ✅ eda_01_overview.py     # 僅 EDA，不放訓練邏輯
-├── ✅ reports/figures/           # 13 張圖表（01–08 EDA，09–11 M4 校準，12–13 M4 業務指標）
+├── ✅ reports/figures/           # 13 張圖表（01–07 + 03b 為 EDA，09–11 M4 校準，12–13 M4 業務指標）
 └── ✅ .github/workflows/ci.yml   # ruff + pytest（見下方 CI 的限制）
 ```
 
