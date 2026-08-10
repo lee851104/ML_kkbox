@@ -27,9 +27,16 @@ early stopping 驗證集、同一個評估函式。只要有一項不同，分�
 
 ## 為什麼統一介面回傳 `Fitted` 而不是各家的 booster
 
-下游（比較表、null importance、MLflow）只需要三件事：預測、停在第幾輪、
-特徵重要度。把它們收斂成一個 dataclass，比較的程式碼就完全不必知道底下是
-誰 —— 加第四個套件只要多寫一個 `fit_*` 函式。
+下游（比較表、null importance、MLflow、M5 原因碼）只需要四件事：預測、
+停在第幾輪、特徵重要度、逐列 SHAP 歸因。把它們收斂成一個 dataclass，比較的
+程式碼就完全不必知道底下是誰 —— 加第四個套件只要多寫一個 `fit_*` 函式。
+
+⚠️ **SHAP 也走這一層，不把 booster 露出去。** M5 需要逐位用戶的歸因，最省事
+的做法是讓 `Fitted` 帶著模型本體，解釋端自己算。但那等於要求解釋端把上面那張
+轉接表**再寫一份**（CatBoost 要 `Pool` 加 `cat_features` 索引、XGBoost 要固定
+字典的 `category` dtype、LightGBM 要無欄名的浮點矩陣）。兩份轉接遲早分歧，而
+分歧的症狀是「歸因指到錯的欄位」—— 名單照樣產生、機率完全正確、原因碼張張
+可讀，只是講的是別人的事，沒有任何一行程式會抱怨。
 
 ⚠️ **特徵重要度的數值不可跨套件比較。** 三家的 gain 定義不同（LightGBM 是
 分裂增益總和、XGBoost 是 total_gain、CatBoost 是 PredictionValuesChange），
@@ -61,6 +68,21 @@ class Fitted:
     best_iteration: int
     predict: Callable[[pl.DataFrame], np.ndarray]
     importance: pl.DataFrame  # feature / gain / gain_share，已依 gain 遞減排序
+
+    # 逐列 SHAP 歸因。輸出 `(列數, 特徵數 + 1)`，**最後一欄是 base value**
+    # （模型對所有人的共同起點）。三家的 API 不同但形狀慣例一致：
+    #
+    #     LightGBM  booster.predict(pred_contrib=True)
+    #     XGBoost   booster.predict(pred_contribs=True)
+    #     CatBoost  model.get_feature_importance(type="ShapValues")
+    #
+    # 三者都是**精確 TreeSHAP**（多項式時間的樹上精確解），不是 KernelSHAP
+    # 那種取樣近似 —— 所以「換一次執行結果會不一樣」這件事不存在。
+    #
+    # ⚠️ **單位是 log-odds，不是機率。** 恆等式是
+    # `sigmoid(base + sum(shap)) == predict()`，相加不等於機率。把 +0.8 讀成
+    # 「流失機率多 80%」是錯的；驗證與換算見 `src/explain/attribution.py`。
+    shap_values: Callable[[pl.DataFrame], np.ndarray]
 
     def top(self, n: int = 12) -> pl.DataFrame:
         return self.importance.head(n)
@@ -129,8 +151,16 @@ def fit_lightgbm(
     def predict(X: pl.DataFrame) -> np.ndarray:
         return booster.predict(X.to_numpy().astype(np.float64), num_iteration=best)
 
+    def shap_values(X: pl.DataFrame) -> np.ndarray:
+        # `num_iteration=best` 要跟 predict 傳同一個值，否則歸因來自一棵比
+        # 預測多幾輪的模型，加總恆等式會差一點點 —— 而「差一點點」正是最難
+        # 察覺的那種錯。
+        return booster.predict(
+            X.to_numpy().astype(np.float64), num_iteration=best, pred_contrib=True
+        )
+
     gains = dict(zip(names, booster.feature_importance("gain"), strict=True))
-    return Fitted("LightGBM", best, predict, _importance_frame(names, gains))
+    return Fitted("LightGBM", best, predict, _importance_frame(names, gains), shap_values)
 
 
 # ---------------------------------------------------------------------------
@@ -239,11 +269,16 @@ def fit_xgboost(
         d = xgb.DMatrix(to_frame(X), enable_categorical=True)
         return booster.predict(d, iteration_range=(0, best))
 
+    def shap_values(X: pl.DataFrame) -> np.ndarray:
+        d = xgb.DMatrix(to_frame(X), enable_categorical=True)
+        return booster.predict(d, iteration_range=(0, best), pred_contribs=True)
+
     return Fitted(
         "XGBoost",
         best,
         predict,
         _importance_frame(train.X.columns, booster.get_score(importance_type="total_gain")),
+        shap_values,
     )
 
 
@@ -295,5 +330,18 @@ def fit_catboost(
     def predict(X: pl.DataFrame) -> np.ndarray:
         return model.predict_proba(Pool(to_frame(X), cat_features=cat_idx))[:, 1]
 
+    def shap_values(X: pl.DataFrame) -> np.ndarray:
+        # 走 predict 的同一條轉接（類別欄轉字串 + cat_features 索引）。
+        #
+        # 這是 M5 選 CatBoost 原生 TreeSHAP 而不裝 `shap` 套件的地方：同一個
+        # 精確演算法、不多一個依賴，而且 Pool 的組法留在本模組 —— 解釋端不必
+        # 知道「類別欄要先轉字串」這件事。
+        #
+        # `use_best_model=True` 已經讓模型只保留到 best_iteration，所以這裡
+        # 不必也不能再指定輪數；歸因與預測必然來自同一棵模型。
+        return model.get_feature_importance(
+            Pool(to_frame(X), cat_features=cat_idx), type="ShapValues"
+        )
+
     gains = dict(zip(train.X.columns, model.get_feature_importance(), strict=True))
-    return Fitted("CatBoost", best, predict, _importance_frame(train.X.columns, gains))
+    return Fitted("CatBoost", best, predict, _importance_frame(train.X.columns, gains), shap_values)

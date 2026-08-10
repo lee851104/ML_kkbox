@@ -188,6 +188,66 @@ def test_subset_bias_differs_from_the_overall_bias():
 
 
 @NODATA
+def test_the_threshold_derivation_has_a_single_source():
+    """M4 的業務曲線與 M5 的原因碼名單必須用同一個 `p*`。
+
+    這是本檔第一條契約的同一個教訓再來一次。M4 一度出現「兩支腳本各自
+    `load_model_config()`，於是校準結論是在一個不會上線的模型上得出的」；
+    `p*` 更容易犯，因為它不是設定值而是**推導結果**（`C / (r × LTV)`，而 LTV
+    又是 `月費 × 1/流失率` 推出來的）。兩支腳本各推一份，症狀會是兩份交付物
+    都印出「投放 4.8 萬人」卻指著不同的名單。
+
+    所以推導只能有一份程式：`src.evaluation.resolve_assumptions`。
+    """
+    for name in ("business_value.py", "explain.py"):
+        src = (REPO_ROOT / "scripts" / name).read_text(encoding="utf-8")
+        assert "resolve_assumptions" in src, f"{name} 沒有走共用的假設推導"
+        assert "def monthly_arpu" not in src, f"{name} 自己實作了一份月費推導"
+
+
+@NODATA
+def test_the_assumption_summary_is_shared_so_manifests_are_comparable():
+    """兩份 manifest 的 `assumptions` 區塊要逐欄可比，所以共用 `summary()`。"""
+    from src.evaluation import resolve_assumptions
+
+    assumptions = resolve_assumptions(
+        {"c_offer": 150, "r_save": 0.15, "days_per_month": 30.4},
+        price_per_day=[4.0, 5.0, None],
+        prior_churn_rate=0.0639,
+    )
+    summary = assumptions.summary()
+
+    assert list(summary) == [
+        "r_save",
+        "c_offer",
+        "ltv_saved",
+        "monthly_arpu",
+        "expected_months",
+        "months_source",
+        "p_star",
+    ]
+    # 手算：月費 4.5 × 30.4 = 136.8；月數 1/0.0639 = 15.65；LTV = 2141.0
+    # p* = 150 / (0.15 × 2140.99) = 0.4670
+    assert summary["monthly_arpu"] == pytest.approx(136.8)
+    assert summary["expected_months"] == pytest.approx(15.65, abs=0.01)
+    assert summary["p_star"] == pytest.approx(0.467, abs=0.001)
+
+
+@NODATA
+def test_the_reason_code_list_records_its_cutoff_definition():
+    """M5 的 manifest 必須記下 cutoff 定義。
+
+    少了它，這份原因碼被拿到 M6 的 `cutoff = 到期日 − 7 天` 版本使用時，
+    沒有任何東西會擋 —— 而 `last_is_cancel` 那一句在那個版本根本還沒發生。
+    """
+    from scripts.explain import CUTOFF_DEFINITION
+
+    assert CUTOFF_DEFINITION == "expire_date"
+    src = (REPO_ROOT / "scripts" / "explain.py").read_text(encoding="utf-8")
+    assert '"cutoff_definition"' in src, "manifest 沒有寫入 cutoff_definition"
+
+
+@NODATA
 def test_rebaseline_runs_the_business_step():
     """`make rebaseline` 宣稱重跑 M1–M4，就必須真的包含 M4 的業務指標。
 

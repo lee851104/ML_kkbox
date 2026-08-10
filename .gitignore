@@ -41,6 +41,10 @@ mlartifacts/
 wandb/
 outputs/
 
+# CatBoost 每次 fit 會在工作目錄留下一份訓練日誌（learn_error.tsv 等）。
+# 那是執行的副產物，不是紀錄 —— MLflow 才是紀錄。
+catboost_info/
+
 # === 編輯器與 OS ===
 .vscode/
 .idea/

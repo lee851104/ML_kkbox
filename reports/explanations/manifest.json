@@ -1,0 +1,115 @@
+{
+  "generated_at": "2026-08-10T17:12:03+08:00",
+  "git_sha": "9748d8473302e6c64f21a88b0470461470ebe37e",
+  "git_dirty": true,
+  "configs": [
+    "configs/business.yaml",
+    "configs/model_comparison.yaml"
+  ],
+  "fingerprints": {
+    "code": {
+      "cohort": "c63649c725ce3425",
+      "log_features": "67c7ae8e14e42c40"
+    },
+    "caches": {
+      "feb": {
+        "cohort": "c63649c725ce3425",
+        "log_features": "67c7ae8e14e42c40"
+      },
+      "mar": {
+        "cohort": "c63649c725ce3425",
+        "log_features": "67c7ae8e14e42c40"
+      }
+    },
+    "stale": []
+  },
+  "cutoff_definition": "expire_date",
+  "model": {
+    "name": "catboost",
+    "best_iteration": 1404,
+    "mar_log_loss": 0.15367,
+    "calibrated": false
+  },
+  "cohort": {
+    "train": "feb",
+    "eval": "mar",
+    "n_eval": 970959
+  },
+  "assumptions": {
+    "r_save": 0.15,
+    "c_offer": 150,
+    "ltv_saved": 2054.1,
+    "monthly_arpu": 131.3,
+    "expected_months": 15.65,
+    "months_source": "feb_churn_rate",
+    "p_star": 0.4868
+  },
+  "list": {
+    "definition": "p_churn > p_star",
+    "mode": "threshold",
+    "n": 48853,
+    "k": 0.0503,
+    "min_probability": 0.486847,
+    "csv": "reports/explanations/targeting_list.csv",
+    "csv_sha256_16": "80e24c65a8878e0f",
+    "csv_in_git": false
+  },
+  "attribution": {
+    "method": "TreeSHAP（CatBoost 原生 ShapValues）",
+    "space": "log-odds",
+    "top_k": 3,
+    "local_accuracy_max_gap": 6.883e-15,
+    "grouped": true
+  },
+  "reasons": {
+    "n_sentences": 145796,
+    "sentences_per_person": {
+      "3": 48138,
+      "2": 667,
+      "1": 48
+    },
+    "top1_groups": {
+      "續訂設定": 0.4657,
+      "取消紀錄": 0.4604,
+      "訂閱資歷": 0.0551,
+      "方案與金額": 0.0189
+    },
+    "expiry_dated": {
+      "原因碼句數": 145796,
+      "到期日訊號句數": 23839,
+      "句數比例": 0.163509,
+      "有原因碼的人數": 48853,
+      "受影響人數": 23839,
+      "受影響人數比例": 0.487974,
+      "到期日訊號佔 Top-3 貢獻的比例": 0.419882
+    }
+  },
+  "targeted_slice_calibration": {
+    "人數": 48853.0,
+    "平均預測": 0.816537,
+    "實際流失率": 0.855116,
+    "偏差": -0.038579,
+    "相對偏差": -0.045116
+  },
+  "global_mean_abs_shap_top10": {
+    "last_is_cancel": 3.67117,
+    "days_since_last_tx": 2.17645,
+    "last_is_auto_renew": 1.71698,
+    "last_payment_method_id": 0.45586,
+    "last_price": 0.31469,
+    "last_plan_days": 0.2046,
+    "cancel_rate": 0.18828,
+    "n_tx": 0.18817,
+    "log_max_days_before": 0.15422,
+    "mean_paid": 0.11899
+  },
+  "figures": [
+    "reports/figures/14_reason_codes.png"
+  ],
+  "how_to_read": [
+    "這份名單是一個函式的輸出，不是一份清單。改 configs/business.yaml 的 C_offer 會改變名單成員，但不會改變任何人的機率與原因碼；改模型或特徵則三者全變。",
+    "CSV 不進 git，每次 make explain 重新產生。下游不得快取它 —— M6 的 /predict 要即時算，不是查表。",
+    "cutoff_definition = expire_date。標成到期日訊號的原因碼（last_is_cancel）不可沿用到 M6 的 T−7 版本，那個版本必須重訓。",
+    "SHAP 的單位是 log-odds，不是機率。貢獻 +0.8 不等於流失率多 80%。"
+  ]
+}

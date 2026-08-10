@@ -7,7 +7,7 @@
 #    效果完全相同 —— 本檔案只是那些指令的集中索引。安裝方式見 README。
 
 .DEFAULT_GOAL := help
-.PHONY: help setup data data-all lint format test test-fast test-ci eda features ablation train compare select encode tune reverse calibrate calibrate-fit multi-seed verify-rebuild rebaseline mlflow clean eval serve
+.PHONY: help setup data data-all lint format test test-fast test-ci eda features ablation train compare select encode tune reverse calibrate calibrate-fit multi-seed verify-rebuild rebaseline mlflow clean eval explain serve
 
 help:
 	@echo "可用目標："
@@ -45,6 +45,7 @@ help:
 	@echo "  clean      清除 __pycache__ / .pytest_cache / .ruff_cache"
 	@echo ""
 	@echo "  eval       M4 業務指標：期望淨收益曲線 + 敏感度熱圖（約 5 分鐘）"
+	@echo "  explain    M5 投放名單 + SHAP 流失原因碼（約 5 分鐘）"
 	@echo "  serve      尚未實作，見該目標訊息"
 
 # --- 環境與資料 ------------------------------------------------------------
@@ -164,6 +165,19 @@ clean:
 # 敏感度熱圖。參數在 configs/business.yaml。約 5 分鐘。
 eval:
 	uv run python scripts/business_value.py
+
+# --- M5 原因碼 ---------------------------------------------------------------
+
+# M5 投放名單與流失原因碼。名單 = 所有 p > p* 的人，p* 與 M4 共用同一份推導。
+#
+# ⚠️ 輸出的 CSV **不是資產**，是這一次執行的結果（*.csv 在 .gitignore 裡，
+#    進不了 git）。改 configs/business.yaml 的 C_offer，名單大小就會變 ——
+#    那是正常的，它是函式的輸出。進 git 的只有 manifest.json，而它只放
+#    provenance 與彙總，不放逐人的列（手冊附錄 A 規則一）。
+#
+# 單一用戶查詢：uv run python scripts/explain.py --msno <msno> ...
+explain:
+	uv run python scripts/explain.py
 
 # 尚未實作的目標明確報錯，不安靜地什麼都不做 —— 一個成功但沒有產出的指令
 # 會讓人以為跑過了。
