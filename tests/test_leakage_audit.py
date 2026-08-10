@@ -39,8 +39,16 @@ import yaml
 
 from src.config import REPO_ROOT, Paths
 from src.data import FEB, MAR, build_cohort
+from src.data.cohort import cohort_fingerprint
 from src.features import build_features, build_log_features
-from src.features.logs import LOG_WINDOWS, expected_log_columns, narrow_logs, window_bounds
+from src.features.logs import (
+    LOG_WINDOWS,
+    expected_log_columns,
+    log_features_fingerprint,
+    narrow_logs,
+    window_bounds,
+)
+from src.fingerprint import write_with_fingerprint
 from tests.conftest import NODATA, make_synthetic_cohort
 
 
@@ -66,7 +74,11 @@ def test_cohort_cache_must_belong_to_the_requested_cohort(tmp_path):
     # 一張「三月」的 cohort 表：cutoff 在 2017-03-15，其餘欄位照舊。
     # 紅線 1 仍然成立（合成資料的 last_tx 全部早於 3/15），所以守門不會叫。
     mar_like = make_synthetic_cohort().with_columns(pl.lit(20170315).alias("cutoff"))
-    mar_like.write_parquet(paths.interim / "feb_cohort_asof.parquet")
+    # ⚠️ 假快取要帶**當前的程式版本指紋**，否則 `build_cohort()` 會先因為
+    # 指紋不符而重算，根本走不到這條測試要驗的守門（見 src/fingerprint.py）。
+    write_with_fingerprint(
+        mar_like, paths.interim / "feb_cohort_asof.parquet", cohort_fingerprint()
+    )
 
     with pytest.raises(AssertionError, match="cohort 錯置"):
         build_cohort(FEB, paths, verbose=False)
@@ -124,8 +136,12 @@ def test_log_feature_cache_must_carry_the_full_feature_schema(tmp_path):
     """
     paths = Paths(tmp_path)
     paths.interim.mkdir(parents=True)
-    pl.DataFrame({"msno": ["u0"], "log_min_days_before": [3], "log_has_logs": [1.0]}).write_parquet(
-        paths.interim / "feb_log_features.parquet"
+    # ⚠️ 假快取要帶**當前的程式版本指紋**，否則 `build_cohort()` 會先因為
+    # 指紋不符而重算，根本走不到這條測試要驗的守門（見 src/fingerprint.py）。
+    write_with_fingerprint(
+        pl.DataFrame({"msno": ["u0"], "log_min_days_before": [3], "log_has_logs": [1.0]}),
+        paths.interim / "feb_log_features.parquet",
+        log_features_fingerprint(),
     )
 
     # 快取被判定為缺欄位 → 走重算路徑 → 在 tmp_path 找不到原始 CSV 而 raise。

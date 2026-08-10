@@ -15,8 +15,11 @@ import pytest
 
 from src.config import REPO_ROOT, Paths
 from src.data import CohortSpec, build_cohort
+from src.data.cohort import cohort_fingerprint
 from src.features import build_features, build_log_features
 from src.features.build import MISSING_CATEGORY
+from src.features.logs import log_features_fingerprint
+from src.fingerprint import write_with_fingerprint
 from src.models.candidates import xgb_category_levels
 from tests.conftest import NODATA, make_synthetic_cohort
 
@@ -48,7 +51,11 @@ def test_cohort_cache_hit_is_revalidated_before_use(tmp_path: Path):
         .otherwise(pl.col("last_tx"))
         .alias("last_tx")
     )
-    poisoned.write_parquet(paths.interim / "feb_cohort_asof.parquet")
+    # ⚠️ 假快取要帶**當前的程式版本指紋**，否則 `build_cohort()` 會先因為
+    # 指紋不符而重算，根本走不到這條測試要驗的守門（見 src/fingerprint.py）。
+    write_with_fingerprint(
+        poisoned, paths.interim / "feb_cohort_asof.parquet", cohort_fingerprint()
+    )
 
     with pytest.raises(AssertionError, match="紅線 1 違反"):
         build_cohort("feb", paths, verbose=False)
@@ -59,13 +66,19 @@ def test_log_feature_cache_hit_is_revalidated_before_use(tmp_path: Path):
     """A cached log table containing future activity must never be trusted blindly."""
     paths = Paths(tmp_path)
     paths.interim.mkdir(parents=True)
-    pl.DataFrame(
-        {
-            "msno": ["u0"],
-            "log_min_days_before": [-3],
-            "log_has_logs": [1.0],
-        }
-    ).write_parquet(paths.interim / "feb_log_features.parquet")
+    # ⚠️ 假快取要帶當前的程式版本指紋，否則會先因指紋不符而重算，
+    # 走不到這條測試要驗的紅線 2 守門（見 src/fingerprint.py）。
+    write_with_fingerprint(
+        pl.DataFrame(
+            {
+                "msno": ["u0"],
+                "log_min_days_before": [-3],
+                "log_has_logs": [1.0],
+            }
+        ),
+        paths.interim / "feb_log_features.parquet",
+        log_features_fingerprint(),
+    )
 
     with pytest.raises(AssertionError, match="紅線 2 違反"):
         build_log_features("feb", paths, verbose=False)

@@ -29,6 +29,7 @@ from dataclasses import dataclass
 import polars as pl
 
 from src.config import Paths, load_paths
+from src.fingerprint import cache_is_current, logic_fingerprint, write_with_fingerprint
 
 
 @dataclass(frozen=True)
@@ -296,6 +297,20 @@ def assert_rows_reproducible(df: pl.DataFrame) -> None:
         )
 
 
+def cohort_fingerprint() -> str:
+    """這份 cohort 快取對應的**程式版本**指紋。
+
+    取自本模組的原始碼（剝掉 docstring 與註解，見 `src.fingerprint`）——
+    `aggregate_asof`、`_last_unambiguous`、`LAST_TX_COLUMNS`、cutoff 的兩條
+    filter 全都在這裡，改任何一個都會讓指紋改變。
+
+    §7.5 遺留的待辦就是這個：欄位檢查看不出「舊版程式算出來的快取」。
+    """
+    import src.data.cohort as _self
+
+    return logic_fingerprint(_self)
+
+
 def build_cohort(
     spec: CohortSpec | str = FEB,
     paths: Paths | None = None,
@@ -326,7 +341,15 @@ def build_cohort(
             print(msg)
 
     cache = paths.interim / f"{spec.name}_cohort_asof.parquet"
-    if cache.exists() and not force:
+    fingerprint = cohort_fingerprint()
+
+    if cache.exists() and not force and not cache_is_current(cache, fingerprint):
+        # ⚠️ 欄位對得上不代表這份快取是現在這版程式算的。改一個常數、改一條
+        # filter —— 欄位一個都沒變，下面四條守門全過，而內容是舊邏輯的產物。
+        # 沒有指紋的快取（修正之前產生的）也走這一條，一律重算一次。
+        log(f"快取 {cache.name} 的程式版本指紋不符（或缺少指紋），重算")
+
+    elif cache.exists() and not force:
         cached = pl.read_parquet(cache)
         if EXPECTED_COLUMNS <= set(cached.columns):
             # ⚠️ **快取命中也要跑守門。**
@@ -432,6 +455,6 @@ def build_cohort(
     assert_cutoffs_within_window(out, spec)
     assert_rows_reproducible(out)
 
-    out.write_parquet(cache)
+    write_with_fingerprint(out, cache, fingerprint)
     log(f"  完成 {out.height:,} 列 × {out.width} 欄，已快取 → {cache.name}")
     return out

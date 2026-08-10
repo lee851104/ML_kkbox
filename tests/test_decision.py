@@ -81,7 +81,7 @@ def test_expected_curve_peaks_exactly_at_the_threshold():
 
     # gain = 1 × 1000 = 1000，C = 500.5 → p* = 0.5005 → 恰好 500 人達標
     curve = campaign_curve(y, p, r_save=1.0, ltv_saved=1000, c_offer=500.5, step=0.001)
-    best = optimal_point(curve, by="期望淨收益")
+    best = optimal_point(curve, by="期望模擬淨收益")
 
     assert decision_threshold(r_save=1.0, ltv_saved=1000, c_offer=500.5) == pytest.approx(0.5005)
     assert best["投放人數"] == 500
@@ -98,7 +98,7 @@ def test_perfect_model_makes_expected_and_realized_identical():
     y = np.array([1.0] * 300 + [0.0] * 700)
     curve = campaign_curve(y, y, r_save=0.2, ltv_saved=1000, c_offer=50, step=0.01)
 
-    assert np.allclose(curve["期望淨收益"].to_numpy(), curve["實際淨收益"].to_numpy())
+    assert np.allclose(curve["期望模擬淨收益"].to_numpy(), curve["標籤結算模擬淨收益"].to_numpy())
 
 
 @NODATA
@@ -114,8 +114,8 @@ def test_underestimating_risk_makes_the_threshold_too_conservative():
     p_low = p_true * 0.72
 
     kwargs = {"r_save": 0.15, "ltv_saved": 2000, "c_offer": 150}  # p* = 0.5
-    honest = optimal_point(campaign_curve(y, p_true, step=0.001, **kwargs), by="期望淨收益")
-    biased = optimal_point(campaign_curve(y, p_low, step=0.001, **kwargs), by="期望淨收益")
+    honest = optimal_point(campaign_curve(y, p_true, step=0.001, **kwargs), by="期望模擬淨收益")
+    biased = optimal_point(campaign_curve(y, p_low, step=0.001, **kwargs), by="期望模擬淨收益")
 
     assert honest["投放人數"] == 400, "p* = 0.5，應選中 0.9 與 0.6 兩組"
     assert biased["投放人數"] == 200, "縮小 0.72 倍後 0.6 → 0.432，掉到門檻以下"
@@ -191,7 +191,7 @@ def test_fixed_rule_point_is_hand_computable():
 
     assert point["投放人數"] == 200
     assert point["命中數"] == 80
-    assert point["實際淨收益"] == pytest.approx(6000.0)
+    assert point["標籤結算模擬淨收益"] == pytest.approx(6000.0)
     assert point["命中率"] == pytest.approx(0.4)
     assert point["lift"] == pytest.approx(4.0)  # base rate 0.1
 

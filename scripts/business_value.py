@@ -1,4 +1,4 @@
-"""M4 · 業務指標：期望淨收益曲線與敏感度熱圖（SPEC §6.1、§6.2）。
+"""M4 · 業務指標：期望模擬淨收益曲線與敏感度熱圖（SPEC §6.1、§6.2）。
 
 SPEC §6.2 稱第一張圖是「整個專案的核心交付物」。它把模型輸出翻譯成一個
 營運可以執行的決定：**這個月該投放給哪一批人。**
@@ -23,19 +23,25 @@ Mar 是評估集的標籤，拿它設業務常數等於用到答案。兩者差�
 
 ## 為什麼要畫兩條曲線
 
-    期望淨收益   用模型的 p 算 —— 模型**以為**會賺多少
-    實際淨收益   用真實標籤 y 算 —— 同樣的假設下**實際**賺多少
+    期望模擬淨收益      p 用**模型預測**算 —— 模型以為會賺多少
+    標籤結算模擬淨收益  p 用**真實標籤 y**（0/1）算 —— 把預測換成答案再算一次
 
-兩條線的落差就是機率低估的價格：模型低估流失風險 → 期望曲線悲觀 →
-極大值往左偏 → **該投放的人被判定為不值得投放**。
+⚠️ **兩條都是模擬，都不是真的賺到的錢。** 真實的只有 Mar 的流失標籤；
+`r_save` 與 `LTV_saved` 仍是假設，而且本資料集沒有實驗組／對照組，
+**無法宣稱任何投放真的改變了行為**（SPEC §6.3 第一點）。
 
-⚠️ 實際曲線用到 Mar 的標籤，只能事後回顧。部署時沒有它。
+兩條線的落差量的是機率誤差的代價：低估流失風險 → 期望曲線悲觀 →
+極大值往左偏 → 門檻設得過於保守。
+
+⚠️ 標籤結算那條用到 Mar 的標籤，只能事後回顧。部署時沒有它。
 
 ## 用 CatBoost 而不是 LightGBM
 
 §7.12 正式採用 CatBoost（Mar 0.15367，配對 8/8）。業務曲線必須用會上線的
-那一個。§7.10 的校準診斷當時用的是 LightGBM，所以本腳本會**另外量一次
-CatBoost 的整體低估幅度** —— 那個數字直接乘進每一筆金額。
+那一個，模型與超參數一律走 `src.models.adopted`，腳本不自帶一份。
+
+⚠️ 本腳本會量 CatBoost 在 Mar 全體的平均低估，但**那個數字不能往下套**到
+個別用戶、風險區間、投放名單或淨收益 —— 投放名單自己的偏差另外報。
 
     uv run python scripts/business_value.py
     make eval
@@ -43,6 +49,7 @@ CatBoost 的整體低估幅度** —— 那個數字直接乘進每一筆金額�
 
 from __future__ import annotations
 
+import json
 import sys
 
 import matplotlib
@@ -62,8 +69,9 @@ from src.evaluation import (
     optimal_point,
     repeat_vs_new,
     sensitivity_grid,
+    subset_calibration,
 )
-from src.models.candidates import fit_catboost, fit_lightgbm, xgb_category_levels
+from src.models.adopted import ADOPTED_MODEL, fit_adopted, load_adopted_config
 from src.models.compare import split_for_early_stopping
 from src.models.train import load_cohort_features
 
@@ -71,22 +79,18 @@ matplotlib.rcParams["font.sans-serif"] = ["Microsoft JhengHei", "Microsoft YaHei
 matplotlib.rcParams["axes.unicode_minus"] = False
 matplotlib.rcParams["figure.dpi"] = 110
 
-FITTERS = {"catboost": fit_catboost, "lightgbm": fit_lightgbm}
 
-
-def load_configs() -> tuple[dict, dict]:
-    """業務參數 + 模型超參數（後者是 model_comparison.yaml 的單一來源）。"""
+def load_configs() -> dict:
+    """業務參數。**模型超參數不在這裡** —— 由 `src.models.adopted` 從
+    `configs/model_comparison.yaml` 讀，全專案只有那一份。"""
     biz_path = REPO_ROOT / "configs" / "business.yaml"
-    cmp_path = REPO_ROOT / "configs" / "model_comparison.yaml"
-    for path in (biz_path, cmp_path):
-        if not path.exists():
-            raise FileNotFoundError(f"找不到 {path}")
+    if not biz_path.exists():
+        raise FileNotFoundError(f"找不到 {biz_path}")
     biz = yaml.safe_load(biz_path.read_text(encoding="utf-8")) or {}
-    cmp_cfg = yaml.safe_load(cmp_path.read_text(encoding="utf-8")) or {}
-    for key in ("business", "sensitivity", "curve", "model"):
+    for key in ("business", "sensitivity", "curve"):
         if key not in biz:
             raise KeyError(f"{biz_path} 缺少 [{key}] 區段")
-    return biz, cmp_cfg
+    return biz
 
 
 def monthly_arpu(fs, days_per_month: float) -> float:
@@ -102,7 +106,7 @@ def monthly_arpu(fs, days_per_month: float) -> float:
 
 
 def campaign_table(scored: pl.DataFrame, biz: dict, ltv: float, step: float) -> pl.DataFrame:
-    """全體與兩個分群各自的最佳投放點（依期望曲線決定，用實際結算）。"""
+    """全體與兩個分群各自的最佳投放點（依期望曲線決定，用標籤結算）。"""
     rows = []
     for name in ("全體", "重複用戶", "新進用戶"):
         part = scored if name == "全體" else scored.filter(pl.col("segment") == name)
@@ -116,7 +120,7 @@ def campaign_table(scored: pl.DataFrame, biz: dict, ltv: float, step: float) -> 
             c_offer=biz["c_offer"],
             step=step,
         )
-        best = optimal_point(curve, by="期望淨收益")
+        best = optimal_point(curve, by="期望模擬淨收益")
         rows.append(
             {
                 "分群": name,
@@ -124,8 +128,8 @@ def campaign_table(scored: pl.DataFrame, biz: dict, ltv: float, step: float) -> 
                 "最佳投放比例": round(best["K"], 4),
                 "投放人數": best["投放人數"],
                 "門檻機率": round(best["門檻機率"], 4),
-                "期望淨收益": round(best["期望淨收益"]),
-                "實際淨收益": round(best["實際淨收益"]),
+                "期望模擬淨收益": round(best["期望模擬淨收益"]),
+                "標籤結算模擬淨收益": round(best["標籤結算模擬淨收益"]),
                 "命中率": round(best["命中率"], 4),
                 "lift": round(best["lift"], 2),
             }
@@ -134,7 +138,7 @@ def campaign_table(scored: pl.DataFrame, biz: dict, ltv: float, step: float) -> 
 
 
 def plot_curve(scored: pl.DataFrame, curve: pl.DataFrame, biz: dict, ltv: float, figdir) -> None:
-    """核心交付圖：期望淨收益 vs 投放比例。
+    """核心交付圖：期望模擬淨收益 vs 投放比例。
 
     ## 為什麼左邊要放大
 
@@ -148,8 +152,8 @@ def plot_curve(scored: pl.DataFrame, curve: pl.DataFrame, biz: dict, ltv: float,
     fig, (ax, ax_full, ax_seg) = plt.subplots(1, 3, figsize=(17, 5))
 
     k = curve["K"].to_numpy() * 100
-    exp = curve["期望淨收益"].to_numpy() / 1e6
-    act = curve["實際淨收益"].to_numpy() / 1e6
+    exp = curve["期望模擬淨收益"].to_numpy() / 1e6
+    act = curve["標籤結算模擬淨收益"].to_numpy() / 1e6
 
     base_rate = float(scored["is_churn"].mean())
     n = scored.height
@@ -175,10 +179,12 @@ def plot_curve(scored: pl.DataFrame, curve: pl.DataFrame, biz: dict, ltv: float,
         (ax_full, 100.0, "全範圍 —— 代價有多陡"),
     ):
         axis.axhline(0, color="#999999", linewidth=1)
-        axis.plot(k, exp, color="#1f77b4", linewidth=1.8, label="期望淨收益（模型以為）")
-        axis.plot(k, act, color="#d62728", linewidth=1.8, label="實際淨收益（事後結算）")
+        axis.plot(k, exp, color="#1f77b4", linewidth=1.8, label="期望模擬淨收益（模型以為）")
+        axis.plot(k, act, color="#d62728", linewidth=1.8, label="標籤結算模擬淨收益（事後結算）")
         axis.plot(k, rand, color="#999999", linestyle=":", linewidth=1.5, label="隨機排序")
-        axis.plot(rule["K"] * 100, rule["實際淨收益"] / 1e6, "s", color="#2ca02c", markersize=8)
+        axis.plot(
+            rule["K"] * 100, rule["標籤結算模擬淨收益"] / 1e6, "s", color="#2ca02c", markersize=8
+        )
         axis.set_xlim(0, xmax)
         axis.set_xlabel("投放比例 K（%，依預測機率由高到低）")
         axis.set_ylabel("淨收益（百萬元）")
@@ -187,7 +193,7 @@ def plot_curve(scored: pl.DataFrame, curve: pl.DataFrame, biz: dict, ltv: float,
 
     # 放大圖的 y 範圍由決策區間內的資料決定，不被右半段的深谷拉扁。
     inside = k <= zoom
-    lo = min(float(act[inside].min()), float(exp[inside].min()), rule["實際淨收益"] / 1e6)
+    lo = min(float(act[inside].min()), float(exp[inside].min()), rule["標籤結算模擬淨收益"] / 1e6)
     hi = max(float(act.max()), float(exp.max()))
     ax.set_ylim(lo - 0.5, hi + 1.6)
 
@@ -206,8 +212,8 @@ def plot_curve(scored: pl.DataFrame, curve: pl.DataFrame, biz: dict, ltv: float,
             color=color,
         )
     ax.annotate(
-        f"全部新進用戶（不需模型）\n{rule['實際淨收益'] / 1e6:.2f} 百萬",
-        (rule["K"] * 100, rule["實際淨收益"] / 1e6),
+        f"全部新進用戶（不需模型）\n{rule['標籤結算模擬淨收益'] / 1e6:.2f} 百萬",
+        (rule["K"] * 100, rule["標籤結算模擬淨收益"] / 1e6),
         textcoords="offset points",
         xytext=(12, -6),
         fontsize=9,
@@ -228,7 +234,7 @@ def plot_curve(scored: pl.DataFrame, curve: pl.DataFrame, biz: dict, ltv: float,
         )
         ax_seg.plot(
             c["K"].to_numpy() * 100,
-            c["實際淨收益"].to_numpy() / 1e6,
+            c["標籤結算模擬淨收益"].to_numpy() / 1e6,
             color=color,
             linewidth=1.8,
             label=f"{name}（{part.height:,} 人）",
@@ -237,13 +243,13 @@ def plot_curve(scored: pl.DataFrame, curve: pl.DataFrame, biz: dict, ltv: float,
     ax_seg.set_xlim(0, 60)
     ax_seg.set_ylim(-8, 4)
     ax_seg.set_xlabel("該分群內部的投放比例 K（%）")
-    ax_seg.set_ylabel("實際淨收益（百萬元）")
+    ax_seg.set_ylabel("標籤結算模擬淨收益（百萬元）")
     ax_seg.set_title("分群內部排序是否仍有價值（§4.5 第 3 點）", fontsize=11)
     ax_seg.legend(fontsize=9, loc="lower left")
     ax_seg.grid(alpha=0.25)
 
     fig.suptitle(
-        f"期望淨收益 vs 投放比例　r_save={biz['r_save']:.0%}"
+        f"期望模擬淨收益 vs 投放比例　r_save={biz['r_save']:.0%}"
         f"　C_offer={biz['c_offer']:.0f} 元　LTV={ltv:.0f} 元"
         f"　→ 門檻 p* = {biz['c_offer'] / (biz['r_save'] * ltv):.4f}",
         fontsize=12,
@@ -262,12 +268,12 @@ def plot_sensitivity(grid: pl.DataFrame, biz: dict, figdir) -> None:
     for row in grid.iter_rows(named=True):
         i, j = c_vals.index(row["c_offer"]), r_vals.index(row["r_save"])
         k[i, j] = row["最佳投放比例"] * 100
-        rev[i, j] = row["實際淨收益"] / 1e6
+        rev[i, j] = row["標籤結算模擬淨收益"] / 1e6
 
     fig, (ax_k, ax_r) = plt.subplots(1, 2, figsize=(14, 5))
     for ax, data, title, fmt, cmap in (
         (ax_k, k, "最佳投放比例 K（%）", "{:.1f}", "viridis"),
-        (ax_r, rev, "照此門檻投放的實際淨收益（百萬元）", "{:+.1f}", "RdYlGn"),
+        (ax_r, rev, "照此門檻投放的標籤結算模擬淨收益（百萬元）", "{:+.1f}", "RdYlGn"),
     ):
         im = ax.imshow(data, aspect="auto", origin="lower", cmap=cmap)
         ax.set_xticks(range(len(r_vals)), [f"{v:.0%}" for v in r_vals])
@@ -313,22 +319,18 @@ def plot_sensitivity(grid: pl.DataFrame, biz: dict, figdir) -> None:
 def main() -> int:
     try:
         paths = load_paths().ensure()
-        biz_cfg, cmp_cfg = load_configs()
+        biz_cfg = load_configs()
     except (FileNotFoundError, KeyError) as e:
         sys.exit(str(e))
 
     biz, sens, curve_cfg = biz_cfg["business"], biz_cfg["sensitivity"], biz_cfg["curve"]
-    model_key = biz_cfg["model"]
+    _, train_cfg = load_adopted_config()
 
     feb, mar = load_cohort_features(paths, biz_cfg)
-    train, es = split_for_early_stopping(feb, cmp_cfg["training"])
+    train, es = split_for_early_stopping(feb, train_cfg)
 
-    print(f"\n訓練中（{model_key}，§7.12 正式採用的模型）...", flush=True)
-    params = dict(cmp_cfg["models"][model_key])
-    extra = {}
-    if model_key == "xgboost":
-        extra["category_levels"] = xgb_category_levels(feb.X, categorical=feb.categorical)
-    fitted = FITTERS[model_key](train, es, params, cmp_cfg["training"], **extra)
+    print(f"\n訓練中（{ADOPTED_MODEL}，§7.12 正式採用的模型）...", flush=True)
+    fitted = fit_adopted(train, es, all_train=feb)
     pred = fitted.predict(mar.X)
     print(f"  停在第 {fitted.best_iteration} 輪　Mar log loss {log_loss(mar.y, pred):.5f}")
 
@@ -368,13 +370,23 @@ def main() -> int:
         f" = **{star:.4f}**"
     )
 
-    # ---- 模型的整體低估（直接乘進每一筆金額）----
+    # ---- 模型的整體低估 ----
+    #
+    # ⚠️ 這個數字**只描述全體 cohort 的平均預測流失率**，不能往下套。
+    #    往下套會錯在四個地方，最容易漏掉的是最後一個：
+    #      個別用戶      每個人的偏差不同
+    #      風險區間      §7.10 的 reliability 曲線顯示各段差很大
+    #      前 K% 名單    那是高機率子集，偏差與全體無關（下面單獨報）
+    #      淨收益        p × r × LTV − C 只有第一項隨 p 縮放，C_offer 是
+    #                    固定成本，所以「機率低估 27%」≠「淨收益低估 27%」
     large = calibration_in_the_large(scored["is_churn"], scored["p_churn"])
     print(
-        f"\n  ⚠️ {model_key} 在 Mar 的整體低估：平均預測 {large['平均預測']:.4%}"
-        f" vs 實際 {large['實際流失率']:.4%}"
+        f"\n  ⚠️ {ADOPTED_MODEL} 在 **Mar 全體 cohort** 的平均預測流失率"
+        f" {large['平均預測']:.4%} vs 實際 {large['實際流失率']:.4%}"
         f"（{large['相對偏差']:+.2%}）\n"
-        "     所有金額因此系統性偏低，方向已知 —— 見 SPEC §6.3 第二點。"
+        "     這是一個關於**全體平均**的數字，不能套到個別用戶、個別風險區間、\n"
+        "     投放名單，也不能套到淨收益（C_offer 是固定成本，不隨機率縮放）。\n"
+        "     投放名單自己的偏差另外報，見第二節。"
     )
 
     # ---- 曲線 ----
@@ -386,26 +398,53 @@ def main() -> int:
         c_offer=biz["c_offer"],
         step=curve_cfg["step"],
     )
-    best_exp = optimal_point(curve, by="期望淨收益")
-    best_act = optimal_point(curve, by="實際淨收益")
+    best_exp = optimal_point(curve, by="期望模擬淨收益")
+    best_act = optimal_point(curve, by="標籤結算模擬淨收益")
 
     print("\n" + "=" * 88)
-    print("二、期望淨收益曲線（基準情境）")
+    print("二、期望模擬淨收益曲線（基準情境）")
     print("=" * 88)
     print(
         f"  依期望曲線（部署時唯一能用的依據）：投放前 {best_exp['K']:.1%}"
         f"（{best_exp['投放人數']:,} 人，門檻機率 {best_exp['門檻機率']:.4f}）\n"
-        f"    期望淨收益 {best_exp['期望淨收益']:>12,.0f} 元"
-        f"　實際結算 {best_exp['實際淨收益']:>12,.0f} 元\n"
+        f"    期望模擬淨收益 {best_exp['期望模擬淨收益']:>12,.0f} 元"
+        f"　標籤結算 {best_exp['標籤結算模擬淨收益']:>12,.0f} 元\n"
         f"    命中率 {best_exp['命中率']:.2%}　lift {best_exp['lift']:.2f}\n"
         f"\n  事後最佳（只能回顧，部署時不知道）：投放前 {best_act['K']:.1%}"
         f"（{best_act['投放人數']:,} 人）\n"
-        f"    實際淨收益 {best_act['實際淨收益']:>12,.0f} 元"
+        f"    標籤結算模擬淨收益 {best_act['標籤結算模擬淨收益']:>12,.0f} 元"
     )
-    gap = best_act["實際淨收益"] - best_exp["實際淨收益"]
+    gap = best_act["標籤結算模擬淨收益"] - best_exp["標籤結算模擬淨收益"]
     print(
-        f"\n  **低估的價格：{gap:,.0f} 元** —— 照期望曲線做，事後會發現少賺這麼多。\n"
+        f"\n  **門檻偏保守的代價：{gap:,.0f} 元** —— 照期望曲線選門檻，"
+        "在標籤結算下比事後最佳少這麼多。\n"
         "  方向與 SPEC §6.1 的預告一致：低估流失風險 → 門檻設得過於保守。"
+    )
+
+    # ---- 投放名單自己的偏差，以及兩條曲線在該點的差距 ----
+    #
+    # 這一段存在的唯一理由：**全體的 −27% 不能套到這份名單。** 名單是機率
+    # 最高的一小撮，它的偏差要自己量。
+    slice_cal = subset_calibration(scored["is_churn"], scored["p_churn"], k=best_exp["K"])
+    exp_rev = best_exp["期望模擬淨收益"]
+    set_rev = best_exp["標籤結算模擬淨收益"]
+
+    print("\n" + "-" * 88)
+    print(f"  模型選定的前 {best_exp['K']:.1%} 名單（{slice_cal['人數']:,} 人）自己的偏差")
+    print("-" * 88)
+    print(
+        f"    平均預測 {slice_cal['平均預測']:.4%}"
+        f"　實際流失率 {slice_cal['實際流失率']:.4%}"
+        f"　相對偏差 **{slice_cal['相對偏差']:+.2%}**\n"
+        f"      ↑ 與全體的 {large['相對偏差']:+.2%} **不同** —— 這正是"
+        "「不能把全體偏差套到子集」的實證。\n"
+        f"\n    期望模擬淨收益      {exp_rev:>14,.0f} 元\n"
+        f"    標籤結算模擬淨收益  {set_rev:>14,.0f} 元\n"
+        f"    差距                {set_rev - exp_rev:>+14,.0f} 元"
+        f"（{set_rev / exp_rev - 1:+.2%}）\n"
+        f"\n    ⚠️ 淨收益的差距（{set_rev / exp_rev - 1:+.2%}）與機率的相對偏差"
+        f"（{slice_cal['相對偏差']:+.2%}）不相等，\n"
+        "       因為 C_offer 是固定成本、不隨機率縮放。**兩者不可互相換算。**"
     )
 
     print("\n" + "=" * 88)
@@ -424,12 +463,17 @@ def main() -> int:
     print(
         f"\n  不需模型的規則「{rule['規則']}」："
         f"投放 {rule['投放人數']:,} 人（{rule['K']:.1%}）"
-        f"　實際淨收益 {rule['實際淨收益']:,.0f} 元　lift {rule['lift']:.2f}"
+        f"　標籤結算模擬淨收益 {rule['標籤結算模擬淨收益']:,.0f} 元　lift {rule['lift']:.2f}"
     )
     verdict = (
-        "✅ 模型勝出" if best_exp["實際淨收益"] > rule["實際淨收益"] else "❌ 模型沒有贏過規則"
+        "✅ 模型勝出"
+        if best_exp["標籤結算模擬淨收益"] > rule["標籤結算模擬淨收益"]
+        else "❌ 模型沒有贏過規則"
     )
-    print(f"  模型排序在同樣的預算下實際淨收益 {best_exp['實際淨收益']:,.0f} 元　→ {verdict}")
+    print(
+        f"  模型排序在同樣的預算下標籤結算模擬淨收益 "
+        f"{best_exp['標籤結算模擬淨收益']:,.0f} 元　→ {verdict}"
+    )
 
     # ---- 敏感度 ----
     grid = sensitivity_grid(
@@ -448,15 +492,54 @@ def main() -> int:
         ).head(48)
     )
 
-    positive = grid.filter(pl.col("實際淨收益") > 0)
+    positive = grid.filter(pl.col("標籤結算模擬淨收益") > 0)
     print(
-        f"\n  48 組假設裡有 {positive.height} 組的實際淨收益為正"
+        f"\n  48 組假設裡有 {positive.height} 組的標籤結算模擬淨收益為正"
         f"（{positive.height / grid.height:.0%}）。"
     )
 
     print("\n產生圖表...")
     plot_curve(scored, curve, biz, ltv, paths.figures)
     plot_sensitivity(grid, biz, paths.figures)
+
+    # ---- 機器可讀的摘要 ----
+    #
+    # `scripts/rebaseline.py` 會把這份 JSON 併進 manifest，讓「這條曲線是用
+    # 哪個模型、哪組假設、跑出什麼門檻」不必靠人去翻 log。完整 log 仍然保存，
+    # 這份只是把最關鍵的欄位提出來。
+    summary = {
+        "model": ADOPTED_MODEL,
+        "configs": ["configs/business.yaml", "configs/model_comparison.yaml"],
+        "mar_log_loss": round(float(log_loss(mar.y, pred)), 5),
+        "assumptions": {
+            "r_save": biz["r_save"],
+            "c_offer": biz["c_offer"],
+            "ltv_saved": round(ltv, 1),
+            "monthly_arpu": round(arpu, 1),
+            "expected_months": round(months, 2),
+            "months_source": "feb_churn_rate",
+            "p_star": round(star, 4),
+        },
+        "optimum_by_expected": {
+            "k": round(best_exp["K"], 4),
+            "n_targeted": int(best_exp["投放人數"]),
+            "threshold_probability": round(float(best_exp["門檻機率"]), 4),
+            "expected_simulated_net": round(float(exp_rev)),
+            "label_settled_simulated_net": round(float(set_rev)),
+            "precision": round(float(best_exp["命中率"]), 4),
+            "lift": round(float(best_exp["lift"]), 2),
+        },
+        "targeted_slice_calibration": {k: round(float(v), 6) for k, v in slice_cal.items()},
+        "cohort_calibration": {k: round(float(v), 6) for k, v in large.items()},
+        "figures": [
+            "reports/figures/12_expected_net_revenue.png",
+            "reports/figures/13_sensitivity_heatmap.png",
+        ],
+    }
+    out_path = REPO_ROOT / "reports" / "business_value.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"    摘要已存 → reports/{out_path.name}")
 
     print("\n" + "=" * 88)
     print("讀法")

@@ -65,8 +65,8 @@ from src.evaluation import (
     roc_auc,
     tie_profile,
 )
-from src.models.candidates import fit_lightgbm
-from src.models.train import load_cohort_features, load_model_config
+from src.models.adopted import ADOPTED_MODEL, fit_adopted
+from src.models.train import load_cohort_features
 from src.models.tuning import three_way_split
 
 matplotlib.rcParams["font.sans-serif"] = ["Microsoft JhengHei", "Microsoft YaHei", "DejaVu Sans"]
@@ -193,7 +193,10 @@ def plot_before_after(scored: pl.DataFrame, cal, figdir) -> None:
             axis.set_minor_locator(matplotlib.ticker.NullLocator())
         ax.grid(alpha=0.25)
 
-    fig.suptitle("isotonic 校準（fit 在 Feb-sel，套到 Mar）· 校準前後與映射本身", fontsize=12)
+    fig.suptitle(
+        f"isotonic 校準 · {ADOPTED_MODEL}（fit 在 Feb-sel，套到 Mar）· 校準前後與映射本身",
+        fontsize=12,
+    )
     path = figdir / "11_calibration_before_after.png"
     fig.savefig(path, dpi=130, bbox_inches="tight")
     print(f"    圖已存 → reports/figures/{path.name}")
@@ -202,21 +205,20 @@ def plot_before_after(scored: pl.DataFrame, cal, figdir) -> None:
 def main() -> int:
     try:
         paths = load_paths().ensure()
-        cfg = load_model_config()
-        split_cfg = load_split_config()
+        cfg = load_split_config()
     except FileNotFoundError as e:
         sys.exit(str(e))
 
     feb, mar = load_cohort_features(paths, cfg)
-    split = three_way_split(feb, split_cfg["split"])
+    split = three_way_split(feb, cfg["split"])
     print(
         f"  Feb 三段切分：訓練 {split.train.X.height:,}"
         f" · early stopping {split.es.X.height:,}"
         f" · 校準 {split.sel.X.height:,}\n"
     )
 
-    print("訓練中（LightGBM，M3 選定的模型）...", flush=True)
-    fitted = fit_lightgbm(split.train, split.es, dict(cfg["model"]), cfg["training"])
+    print(f"訓練中（{ADOPTED_MODEL}，§7.12 正式採用的模型）...", flush=True)
+    fitted = fit_adopted(split.train, split.es, all_train=feb)
     p_sel = fitted.predict(split.sel.X)
     print(f"  停在第 {fitted.best_iteration} 輪")
 

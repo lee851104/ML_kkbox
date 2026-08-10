@@ -25,6 +25,7 @@ from src.evaluation.decision import (
     fixed_rule_point,
     optimal_point,
     sensitivity_grid,
+    subset_calibration,
 )
 from src.evaluation.metrics import (
     EPS,
@@ -56,5 +57,6 @@ __all__ = [
     "roc_auc",
     "segment_report",
     "sensitivity_grid",
+    "subset_calibration",
     "tie_profile",
 ]

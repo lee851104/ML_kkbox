@@ -20,11 +20,16 @@ SPEC §4.5：新進用戶（9.2%）與重複用戶（90.8%）的流失率差 6.8
 曲線會被 90.8% 的重複用戶主導，新進用戶那組的失準完全看不見 —— 而那正是
 挽回名單最需要正確機率的族群。
 
-## 模型設定與 M3 一致
+## 模型用**正式採用的那一個**
 
-訓練用 Feb-train、early stopping 用 Feb-es，兩者都來自 `configs/tuning.yaml`
-的三段切分。**Feb-sel 這一塊刻意留著不用** —— 下一步的校準器要 fit 在它
-上面，現在先碰它就等於提前用掉。
+⚠️ 本腳本一度用 LightGBM，而 §7.12 正式採用的是 CatBoost —— 於是「校準器
+該不該上線」這個結論，是在一個不會上線的模型上得出的。現在一律走
+`src.models.adopted`，超參數從 `configs/model_comparison.yaml` 讀，
+腳本不自帶一份。
+
+訓練用 Feb-train、early stopping 用 Feb-es，切分來自 `configs/calibration.yaml`。
+**Feb-sel 這一塊刻意留著不用** —— 下一步的校準器要 fit 在它上面，現在先碰
+它就等於提前用掉。**Mar 全程只在最後評估一次，標籤不參與任何決定。**
 
     uv run python scripts/calibration_report.py
     make calibrate
@@ -50,8 +55,8 @@ from src.evaluation import (
     reliability_curve,
     repeat_vs_new,
 )
-from src.models.candidates import fit_lightgbm
-from src.models.train import load_cohort_features, load_model_config
+from src.models.adopted import ADOPTED_MODEL, fit_adopted
+from src.models.train import load_cohort_features
 from src.models.tuning import three_way_split
 
 # 與 notebooks/eda_01_overview.py 相同的字體設定 —— Windows 的 matplotlib
@@ -189,7 +194,8 @@ def plot_reliability(curves: dict[str, pl.DataFrame], figdir, strategy: str) -> 
         ax.grid(alpha=0.25)
 
     fig.suptitle(
-        f"Reliability diagram · Mar cohort（{strategy} 分箱）　點在對角線下方 = 低估流失風險",
+        f"Reliability diagram · Mar cohort · {ADOPTED_MODEL}（{strategy} 分箱）"
+        "　點在對角線下方 = 低估流失風險",
         fontsize=12,
     )
     path = figdir / "09_reliability_diagram.png"
@@ -245,21 +251,20 @@ def plot_gap_by_decile(scored: pl.DataFrame, figdir) -> None:
 def main() -> int:
     try:
         paths = load_paths().ensure()
-        cfg = load_model_config()
-        split_cfg = load_split_config()
+        cfg = load_split_config()
     except FileNotFoundError as e:
         sys.exit(str(e))
 
     feb, mar = load_cohort_features(paths, cfg)
-    split = three_way_split(feb, split_cfg["split"])
+    split = three_way_split(feb, cfg["split"])
     print(
         f"  Feb 三段切分：訓練 {split.train.X.height:,}"
         f" · early stopping {split.es.X.height:,}"
         f" · 保留給校準器 {split.sel.X.height:,}（本步驟不使用）\n"
     )
 
-    print("訓練中（LightGBM，M3 選定的模型）...", flush=True)
-    fitted = fit_lightgbm(split.train, split.es, dict(cfg["model"]), cfg["training"])
+    print(f"訓練中（{ADOPTED_MODEL}，§7.12 正式採用的模型）...", flush=True)
+    fitted = fit_adopted(split.train, split.es, all_train=feb)
     pred = fitted.predict(mar.X)
     print(f"  停在第 {fitted.best_iteration} 輪，Mar log loss {log_loss(mar.y, pred):.5f}")
 

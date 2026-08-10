@@ -39,6 +39,7 @@ import polars as pl
 
 from src.config import Paths, load_paths
 from src.data import COHORTS, CohortSpec, build_cohort
+from src.fingerprint import cache_is_current, logic_fingerprint, write_with_fingerprint
 
 # SPEC §7 指定的觀察窗口。
 LOG_WINDOWS: tuple[int, ...] = (7, 14, 30, 90)
@@ -228,6 +229,18 @@ def narrow_logs(
     return out
 
 
+def log_features_fingerprint() -> str:
+    """收聽特徵快取對應的程式版本指紋。
+
+    涵蓋**本模組與 `src.data.cohort`**：窗口是相對於每位用戶的 cutoff 算的，
+    所以 cutoff 的邏輯一改，這張表就過時了 —— 只看本模組會漏掉那一半。
+    """
+    import src.data.cohort as _cohort
+    import src.features.logs as _self
+
+    return logic_fingerprint(_self, _cohort)
+
+
 # total_secs 換算成整數毫秒的倍率。見 _window_aggs 的說明。
 SECS_SCALE = 1000
 
@@ -316,7 +329,14 @@ def build_log_features(
             print(msg, flush=True)
 
     cache = paths.interim / f"{spec.name}_log_features.parquet"
-    if cache.exists() and not force:
+    fingerprint = log_features_fingerprint()
+
+    if cache.exists() and not force and not cache_is_current(cache, fingerprint):
+        # 指紋涵蓋本模組**與** src.data.cohort：收聽特徵的窗口是相對於每位
+        # 用戶的 cutoff 算的，cutoff 的邏輯一改，這張表就過時了。
+        log(f"快取 {cache.name} 的程式版本指紋不符（或缺少指紋），重算")
+
+    elif cache.exists() and not force:
         cached = pl.read_parquet(cache)
         # ⚠️ **快取命中也要跑守門**，理由同 `build_cohort()`：快取是檔案不是
         # 保證。一張 `log_min_days_before` 為負的舊快取，代表裡面含有到期日
@@ -404,7 +424,7 @@ def build_log_features(
     # 排序的成本是一次 80 萬列的 sort，換掉整類問題。
     out = out.sort("msno")
 
-    out.write_parquet(cache)
+    write_with_fingerprint(out, cache, fingerprint)
     covered = out.height / cutoffs.height
     log(f"  完成 {out.height:,} 列 × {out.width} 欄（覆蓋 {covered:.2%} 的 cohort 用戶）")
     log(f"  已快取 → {cache.name}")

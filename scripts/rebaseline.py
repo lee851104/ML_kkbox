@@ -17,8 +17,8 @@
 **不下結論。** 這支腳本只負責跑與記錄；哪些舊結論仍然成立要人來判斷，因為
 「差 0.0004 算不算變了」取決於當初那個結論是用多大的效果撐起來的。
 
-**不跑 M4 業務收益圖。** r_save / C_offer / LTV 的假設值尚未定案，跑出來的
-曲線會被引用，然後假設一改就得整批作廢。
+**不重跑 M1–M3 的資料快取。** 快取由  的程式版本指紋自動
+判斷是否過時；這支腳本只負責重跑實驗，不負責重建資料。
 
     uv run python scripts/rebaseline.py            # 全部
     uv run python scripts/rebaseline.py --quick    # 只跑幾分鐘內的
@@ -37,19 +37,33 @@ from pathlib import Path
 
 from src.config import REPO_ROOT
 
-# (名稱, 對應里程碑, 腳本, 設定檔, 約需分鐘, 是否列入 --quick)
-STEPS: list[tuple[str, str, list[str], str, int, bool]] = [
-    ("m1_m2_baseline", "M1 + M2", ["scripts/train.py"], "configs/model_lgbm.yaml", 2, True),
+# (名稱, 對應里程碑, 腳本, 設定檔, 約需分鐘, 是否列入 --quick, 摘要 JSON 或 None)
+#
+# ⚠️ **M4 有三步，不是兩步。** 這份清單一度只有校準診斷與校準器，於是
+# `make rebaseline` 宣稱「重跑 M1–M4」而 §6.2 的核心交付物（期望模擬淨收益
+# 曲線）根本沒動過 —— manifest 會顯示 M4 已重跑，那是假的。
+STEPS: list[tuple[str, str, list[str], str, int, bool, str | None]] = [
+    ("m1_m2_baseline", "M1 + M2", ["scripts/train.py"], "configs/model_lgbm.yaml", 2, True, None),
     (
         "m4_calibration_diag",
         "M4",
         ["scripts/calibration_report.py"],
         "configs/calibration.yaml",
-        3,
+        5,
         True,
+        None,
     ),
-    ("m4_calibrator", "M4", ["scripts/calibrate.py"], "configs/calibration.yaml", 3, True),
-    ("m3_compare", "M3", ["scripts/compare.py"], "configs/model_comparison.yaml", 6, False),
+    ("m4_calibrator", "M4", ["scripts/calibrate.py"], "configs/calibration.yaml", 5, True, None),
+    (
+        "m4_business",
+        "M4",
+        ["scripts/business_value.py"],
+        "configs/business.yaml",
+        6,
+        True,
+        "reports/business_value.json",
+    ),
+    ("m3_compare", "M3", ["scripts/compare.py"], "configs/model_comparison.yaml", 6, False, None),
     (
         "m3_reverse",
         "M3",
@@ -57,8 +71,9 @@ STEPS: list[tuple[str, str, list[str], str, int, bool]] = [
         "configs/model_comparison.yaml",
         12,
         False,
+        None,
     ),
-    ("m3_tune", "M3", ["scripts/tune.py"], "configs/tuning.yaml", 15, False),
+    ("m3_tune", "M3", ["scripts/tune.py"], "configs/tuning.yaml", 15, False, None),
     (
         "m3_select",
         "M3",
@@ -66,6 +81,7 @@ STEPS: list[tuple[str, str, list[str], str, int, bool]] = [
         "configs/feature_selection.yaml",
         25,
         False,
+        None,
     ),
 ]
 
@@ -85,7 +101,14 @@ def git_dirty() -> bool:
     return bool(out.stdout.strip())
 
 
-def run_step(name: str, milestone: str, cmd: list[str], config: str, outdir: Path) -> dict:
+def run_step(
+    name: str,
+    milestone: str,
+    cmd: list[str],
+    config: str,
+    outdir: Path,
+    summary_json: str | None = None,
+) -> dict:
     """跑一步，完整 stdout 存檔，回傳這一步的紀錄。"""
     log_path = outdir / f"{name}.log"
     full = [sys.executable, *cmd]
@@ -130,7 +153,7 @@ def run_step(name: str, milestone: str, cmd: list[str], config: str, outdir: Pat
     if proc.returncode != 0:
         print(f"  ⚠️ stderr 末段：\n{proc.stderr[-800:]}", flush=True)
 
-    return {
+    record = {
         "step": name,
         "milestone": milestone,
         "command": " ".join(cmd),
@@ -139,6 +162,18 @@ def run_step(name: str, milestone: str, cmd: list[str], config: str, outdir: Pat
         "minutes": round(seconds / 60, 2),
         "log": f"reports/rebaseline/{log_path.name}",
     }
+
+    # 腳本自己產生的機器可讀摘要（模型、假設、門檻、圖表路徑）併進 manifest ——
+    # 「這一步跑出什麼」不必靠人去翻 log。
+    if summary_json:
+        path = REPO_ROOT / summary_json
+        if path.exists():
+            record["summary"] = json.loads(path.read_text(encoding="utf-8"))
+        else:
+            record["summary"] = None
+            print(f"  ⚠️ 預期的摘要 {summary_json} 不存在", flush=True)
+
+    return record
 
 
 def main() -> int:
@@ -161,7 +196,7 @@ def main() -> int:
     total = sum(s[4] for s in steps)
     print(f"git {sha[:7]}　{len(steps)} 步　預估約 {total} 分鐘\n")
 
-    records = [run_step(n, m, c, cfg, outdir) for n, m, c, cfg, _, _ in steps]
+    records = [run_step(n, m, c, cfg, outdir, js) for n, m, c, cfg, _, _, js in steps]
 
     manifest = {
         "git_sha": sha,

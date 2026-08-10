@@ -18,17 +18,24 @@
    因為排在他後面的每個人都讓總額變小。這是恆等式不是巧合，所以
    `campaign_curve()` 的極大值可以拿來驗證實作（見測試）。
 
-## 為什麼期望與實際兩條曲線都要畫
+## 兩條曲線都是模擬，差別只在「機率從哪來」
 
-    期望淨收益   用模型的 p 算 —— 模型**以為**會賺多少
-    實際淨收益   用真實標籤 y 算 —— 在同樣的 r_save / LTV 假設下**實際**賺多少
+    期望模擬淨收益      p 用**模型預測** —— 模型以為會賺多少
+    標籤結算模擬淨收益  p 用**真實標籤 y**（0/1）—— 把預測換成答案再算一次
 
-兩條線的落差就是 §7.10 那個 27.6% 低估的價格。模型低估流失風險 → 期望曲線
-比實際曲線悲觀 → 極大值往左偏 → **投放門檻設得過於保守，該投放的人被判定
-為不值得投放**。SPEC §6.1 早就預告了這個方向，這兩條曲線把它變成金額。
+⚠️ **兩條都不是真的賺到的錢，名字必須說清楚這件事。**
 
-⚠️ 實際曲線用到 Mar 的標籤，**只能事後回顧，不能拿來決定門檻** —— 部署時
-沒有它。它在這裡的角色是「如果我們照期望曲線做，事後會發現少賺多少」。
+真實的只有 Mar 的流失標籤。`r_save`（挽回成功率）與 `LTV_saved` 仍然是假設：
+本資料集沒有實驗組／對照組，**無法驗證投放是否真的改變了任何人的行為**
+（SPEC §6.3 第一點）。所以第二條線叫「標籤結算模擬」而不是「實際」——
+它回答的是「若挽回假設成立，且我們事先知道誰會流失，這組假設會算出多少」，
+不是「我們賺到了多少」。
+
+兩條線的落差量的是**機率誤差的代價**：模型低估流失風險 → 期望曲線比較悲觀
+→ 極大值往左偏 → 投放門檻設得過於保守。SPEC §6.1 預告了這個方向。
+
+⚠️ 標籤結算那條用到 Mar 的標籤，**只能事後回顧，不能拿來決定門檻** ——
+部署時沒有它。
 
 ## 名單品質的三個對照組
 
@@ -103,7 +110,7 @@ def campaign_curve(
     c_offer: float,
     step: float = 0.002,
 ) -> pl.DataFrame:
-    """投放前 K% 的期望與實際淨收益，K 從 `step` 掃到 1.0。
+    """投放前 K% 的期望與標籤結算兩種模擬淨收益，K 從 `step` 掃到 1.0。
 
     Args:
         step: K 的解析度。預設 0.002 = 每 0.2 個百分點一個點（500 個點）。
@@ -111,7 +118,7 @@ def campaign_curve(
     Returns:
         每個 K 一列：
 
-            K / 投放人數 / 門檻機率 / 期望淨收益 / 實際淨收益 /
+            K / 投放人數 / 門檻機率 / 期望模擬淨收益 / 標籤結算模擬淨收益 /
             命中數 / 命中率 / lift
 
         「門檻機率」是該 K 之下最低的預測機率 —— 對應實際操作中的「發送
@@ -153,8 +160,8 @@ def campaign_curve(
             "K": ks[: len(idx)],
             "投放人數": sizes,
             "門檻機率": p_sorted[idx],
-            "期望淨收益": cum_p[idx] * gain - sizes * c_offer,
-            "實際淨收益": hits * gain - sizes * c_offer,
+            "期望模擬淨收益": cum_p[idx] * gain - sizes * c_offer,
+            "標籤結算模擬淨收益": hits * gain - sizes * c_offer,
             "命中數": hits.astype(np.int64),
             "命中率": precision,
             "lift": precision / base_rate if base_rate else np.full(len(idx), np.nan),
@@ -162,12 +169,60 @@ def campaign_curve(
     )
 
 
-def optimal_point(curve: pl.DataFrame, *, by: str = "期望淨收益") -> dict:
+def subset_calibration(y_true: Iterable, y_pred: Iterable, *, k: float) -> dict:
+    """**投放名單自己的**校準偏差 —— 不是全體 cohort 的那一個。
+
+    ## 為什麼需要這個函式
+
+    「模型在 Mar 低估 27%」是一句關於**全體 cohort 平均預測流失率**的話。
+    把它套到別的地方全都不成立：
+
+        個別用戶        每個人的偏差不同
+        個別風險區間    §7.10 的 reliability 曲線顯示各段差很大
+        前 K% 名單      那是一個高機率子集，偏差與全體無關
+        淨收益          `p × r × LTV − C` 只有第一項隨 p 縮放，
+                        `C_offer` 是固定成本，不隨機率縮放
+
+    最後一項最容易漏掉：機率低估 27%**不等於**淨收益低估 27%。
+
+    這個函式讓報表可以誠實地說「這份名單自己的偏差是多少」，而不是把全體
+    的數字借過來用。
+
+    Args:
+        k: 取預測機率最高的前 k 比例（0 < k <= 1）。
+
+    Returns:
+        人數 / 平均預測 / 實際流失率 / 偏差 / 相對偏差。
+    """
+    y = _as_array(y_true)
+    p = _as_array(y_pred)
+    if y.size != p.size:
+        raise ValueError(f"長度不符：y_true {y.size} 筆，y_pred {p.size} 筆")
+    if y.size == 0:
+        raise ValueError("空的輸入無法計算子集校準")
+    if not 0 < k <= 1:
+        raise ValueError(f"k 必須落在 (0, 1]：{k}")
+
+    order = np.argsort(-p, kind="stable")
+    size = max(1, int(round(k * y.size)))
+    idx = order[:size]
+
+    actual, predicted = float(y[idx].mean()), float(p[idx].mean())
+    return {
+        "人數": size,
+        "平均預測": predicted,
+        "實際流失率": actual,
+        "偏差": predicted - actual,
+        "相對偏差": predicted / actual - 1 if actual else float("nan"),
+    }
+
+
+def optimal_point(curve: pl.DataFrame, *, by: str = "期望模擬淨收益") -> dict:
     """曲線的極大值那一列。
 
     Args:
-        by: 依哪一欄取極大 —— 「期望淨收益」是部署時唯一能用的依據，
-            「實際淨收益」只能事後回顧。
+        by: 依哪一欄取極大 —— 「期望模擬淨收益」是部署時唯一能用的依據，
+            「標籤結算模擬淨收益」用到答案，只能事後回顧。
     """
     if by not in curve.columns:
         raise KeyError(f"找不到欄位 {by!r}。現有欄位：{curve.columns}")
@@ -209,7 +264,7 @@ def fixed_rule_point(
         "規則": label,
         "K": size / y.size,
         "投放人數": size,
-        "實際淨收益": hits * r_save * ltv_saved - size * c_offer,
+        "標籤結算模擬淨收益": hits * r_save * ltv_saved - size * c_offer,
         "命中數": int(hits),
         "命中率": precision,
         "lift": precision / base_rate if base_rate else float("nan"),
@@ -224,15 +279,15 @@ def sensitivity_grid(
     r_values: Sequence[float],
     c_values: Sequence[float],
 ) -> pl.DataFrame:
-    """`r_save` × `C_offer` 網格上，最佳投放比例與該點的實際淨收益。
+    """`r_save` × `C_offer` 網格上，最佳投放比例與該點的標籤結算模擬淨收益。
 
     每一格的決策都照部署時的作法算：門檻 `p* = C/(r×LTV)`，投放所有
-    `p > p*` 的人。**實際淨收益**則用真實標籤結算 —— 也就是「照這組假設
-    去做，事後會賺多少」。
+    `p > p*` 的人。**標籤結算模擬淨收益**則把預測換成真實標籤再算一次 ——
+    仍然是模擬（`r_save` 與 LTV 是假設），只是機率換成了答案。
 
     Returns:
         每格一列：r_save / c_offer / p* / 最佳投放比例 / 投放人數 /
-        實際淨收益 / 期望淨收益。
+        期望模擬淨收益 / 標籤結算模擬淨收益。
     """
     y = _as_array(y_true)
     p = _as_array(y_pred)
@@ -260,8 +315,8 @@ def sensitivity_grid(
                     "p*": star,
                     "最佳投放比例": size / n,
                     "投放人數": size,
-                    "期望淨收益": cum_p[size] * r * ltv_saved - size * c,
-                    "實際淨收益": cum_y[size] * r * ltv_saved - size * c,
+                    "期望模擬淨收益": cum_p[size] * r * ltv_saved - size * c,
+                    "標籤結算模擬淨收益": cum_y[size] * r * ltv_saved - size * c,
                 }
             )
     return pl.DataFrame(rows)
