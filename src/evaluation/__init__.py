@@ -19,11 +19,14 @@ from src.evaluation.calibrator import (
 )
 from src.evaluation.decision import (
     DAYS_PER_MONTH,
+    Assumptions,
     campaign_curve,
     decision_threshold,
     expected_months,
     fixed_rule_point,
+    monthly_arpu,
     optimal_point,
+    resolve_assumptions,
     sensitivity_grid,
     subset_calibration,
 )
@@ -39,6 +42,7 @@ from src.evaluation.metrics import (
 __all__ = [
     "DAYS_PER_MONTH",
     "EPS",
+    "Assumptions",
     "IsotonicCalibrator",
     "brier_score",
     "calibration_in_the_large",
@@ -51,9 +55,11 @@ __all__ = [
     "fixed_rule_point",
     "log_loss",
     "max_calibration_error",
+    "monthly_arpu",
     "optimal_point",
     "reliability_curve",
     "repeat_vs_new",
+    "resolve_assumptions",
     "roc_auc",
     "segment_report",
     "sensitivity_grid",

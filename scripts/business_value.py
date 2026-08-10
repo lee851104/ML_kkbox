@@ -62,12 +62,12 @@ from src.config import REPO_ROOT, load_paths
 from src.evaluation import (
     calibration_in_the_large,
     campaign_curve,
-    decision_threshold,
     expected_months,
     fixed_rule_point,
     log_loss,
     optimal_point,
     repeat_vs_new,
+    resolve_assumptions,
     sensitivity_grid,
     subset_calibration,
 )
@@ -91,18 +91,6 @@ def load_configs() -> dict:
         if key not in biz:
             raise KeyError(f"{biz_path} 缺少 [{key}] 區段")
     return biz
-
-
-def monthly_arpu(fs, days_per_month: float) -> float:
-    """cohort 的平均月費，由 `price_per_day` 換算。
-
-    用實付而非定價：定價是牌價，實付才是這位用戶真的貢獻的收入。
-    null（同日多筆且金額衝突，見 §7.11）直接排除，不補值。
-    """
-    per_day = fs.X["price_per_day"].drop_nulls()
-    if per_day.len() == 0:
-        raise ValueError("price_per_day 全為 null，無法推估月費")
-    return float(per_day.mean()) * days_per_month
 
 
 def campaign_table(scored: pl.DataFrame, biz: dict, ltv: float, step: float) -> pl.DataFrame:
@@ -343,10 +331,15 @@ def main() -> int:
     )
 
     # ---- LTV：月費由資料算，續訂月數用上一期的流失率 ----
-    arpu = monthly_arpu(mar, biz["days_per_month"])
+    #
+    # 推導走 `src.evaluation.resolve_assumptions`，**不在這裡自己算** ——
+    # M5 的原因碼名單要用同一個 p*，兩支腳本各推一份遲早分歧，而分歧的症狀是
+    # 兩份交付物都印出「投放 4.8 萬人」卻指著不同的名單。
     feb_rate, mar_rate = float(feb.y.mean()), float(mar.y.mean())
-    months = expected_months(feb_rate)
-    ltv = arpu * months
+    assumptions = resolve_assumptions(
+        biz, price_per_day=mar.X["price_per_day"], prior_churn_rate=feb_rate
+    )
+    arpu, months, ltv = assumptions.monthly_arpu, assumptions.expected_months, assumptions.ltv_saved
     ltv_mar = arpu * expected_months(mar_rate)
 
     pl.Config.set_tbl_rows(60)
@@ -364,7 +357,7 @@ def main() -> int:
         f"但那是評估集的標籤，\n     拿它設業務常數等於用到答案。差距落在 C_offer 的掃描區間內。"
     )
 
-    star = decision_threshold(r_save=biz["r_save"], ltv_saved=ltv, c_offer=biz["c_offer"])
+    star = assumptions.p_star
     print(
         f"\n  投放門檻 p* = {biz['c_offer']:.0f} / ({biz['r_save']:.2f} × {ltv:.0f})"
         f" = **{star:.4f}**"
@@ -511,15 +504,7 @@ def main() -> int:
         "model": ADOPTED_MODEL,
         "configs": ["configs/business.yaml", "configs/model_comparison.yaml"],
         "mar_log_loss": round(float(log_loss(mar.y, pred)), 5),
-        "assumptions": {
-            "r_save": biz["r_save"],
-            "c_offer": biz["c_offer"],
-            "ltv_saved": round(ltv, 1),
-            "monthly_arpu": round(arpu, 1),
-            "expected_months": round(months, 2),
-            "months_source": "feb_churn_rate",
-            "p_star": round(star, 4),
-        },
+        "assumptions": assumptions.summary(),
         "optimum_by_expected": {
             "k": round(best_exp["K"], 4),
             "n_targeted": int(best_exp["投放人數"]),

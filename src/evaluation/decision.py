@@ -50,6 +50,7 @@ SPEC §4.5 第 3 點：「若模型只是學會『新客風險高』，那挽回
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 
 import numpy as np
 import polars as pl
@@ -99,6 +100,92 @@ def expected_months(monthly_churn_rate: float) -> float:
     if not 0 < monthly_churn_rate < 1:
         raise ValueError(f"月流失率必須落在 (0, 1)：{monthly_churn_rate}")
     return 1.0 / monthly_churn_rate
+
+
+def monthly_arpu(price_per_day: Iterable, days_per_month: float) -> float:
+    """cohort 的平均月費，由 `price_per_day` 換算。
+
+    用實付而非定價：定價是牌價，實付才是這位用戶真的貢獻的收入。
+    null（同日多筆且金額衝突，見 §7.11）直接排除，不補值。
+
+    Raises:
+        ValueError: 全為 null，無法推估。
+    """
+    series = price_per_day if isinstance(price_per_day, pl.Series) else pl.Series(price_per_day)
+    per_day = series.drop_nulls()
+    if per_day.len() == 0:
+        raise ValueError("price_per_day 全為 null，無法推估月費")
+    return float(per_day.mean()) * days_per_month
+
+
+@dataclass(frozen=True)
+class Assumptions:
+    """一組業務假設，以及由它們推導出來的投放門檻。
+
+    ## 為什麼要有這個類別
+
+    M4 的業務指標與 M5 的原因碼名單**必須用同一個 `p*`**，否則兩份交付物講的
+    是不同的名單 —— 而它們都會印出「投放 4.8 萬人」這種看起來一致的句子。
+
+    這是 `src.models.adopted` 同一個教訓的第二次：那次是「兩支腳本各自
+    `load_model_config()`，於是校準結論是在一個不會上線的模型上得出的」。
+    參數不是設定值而是**推導結果**時，推導只能有一份程式。
+    """
+
+    r_save: float
+    c_offer: float
+    monthly_arpu: float
+    expected_months: float
+    ltv_saved: float
+    p_star: float
+    months_source: str
+
+    def summary(self) -> dict:
+        """進 JSON 的欄位。兩支腳本共用這個方法，manifest 才逐欄可比。"""
+        return {
+            "r_save": self.r_save,
+            "c_offer": self.c_offer,
+            "ltv_saved": round(self.ltv_saved, 1),
+            "monthly_arpu": round(self.monthly_arpu, 1),
+            "expected_months": round(self.expected_months, 2),
+            "months_source": self.months_source,
+            "p_star": round(self.p_star, 4),
+        }
+
+
+def resolve_assumptions(
+    biz: dict,
+    *,
+    price_per_day: Iterable,
+    prior_churn_rate: float,
+    months_source: str = "feb_churn_rate",
+) -> Assumptions:
+    """把 `configs/business.yaml` 加上 cohort 實測值，推成完整的一組假設。
+
+    Args:
+        biz: `business.yaml` 的 `[business]` 區段（`c_offer` / `r_save` /
+            `days_per_month`）。
+        price_per_day: **評估 cohort** 的日均單價，用來算月費。
+        prior_churn_rate: **上一期**的月流失率。⚠️ 不可傳評估 cohort 的 ——
+            那是標籤，拿它設業務常數等於用到答案（見 `expected_months`）。
+        months_source: 這個流失率的來源，會寫進 manifest 供回溯。
+    """
+    for key in ("c_offer", "r_save", "days_per_month"):
+        if key not in biz:
+            raise KeyError(f"business 區段缺少 {key!r}")
+
+    arpu = monthly_arpu(price_per_day, biz["days_per_month"])
+    months = expected_months(prior_churn_rate)
+    ltv = arpu * months
+    return Assumptions(
+        r_save=biz["r_save"],
+        c_offer=biz["c_offer"],
+        monthly_arpu=arpu,
+        expected_months=months,
+        ltv_saved=ltv,
+        p_star=decision_threshold(r_save=biz["r_save"], ltv_saved=ltv, c_offer=biz["c_offer"]),
+        months_source=months_source,
+    )
 
 
 def campaign_curve(
