@@ -7,7 +7,7 @@
 > 機率的**校準**原本列為交付項目之一。M4 實測後撤下：模型在自己月份上校準得幾乎完美，跨月的低估來自基準率漂移，校準器修不掉它，套上去反而更差。取而代之的是把偏差的**方向與幅度**標註清楚。見下方「M4 的發現」。
 
 **資料集**：[WSDM – KKBox's Churn Prediction Challenge](https://www.kaggle.com/competitions/kkbox-churn-prediction-challenge)（WSDM Cup 2018）
-**指標**：Log Loss ｜ **規格書**：[SPEC.md](SPEC.md) ｜ **模型限制**：`MODEL_CARD.md`（待建立）
+**指標**：Log Loss ｜ **規格書**：[SPEC.md](SPEC.md) ｜ **模型限制**：[MODEL_CARD.md](MODEL_CARD.md)
 
 ---
 
@@ -625,7 +625,7 @@ build_features(Feb cohort, Mar 收聽特徵) → 沒有拋出任何例外
 
 **資料集沒有提供屬性的歷史版本，無法修復。** 能做的是量化並記錄——實測暴露面 **0.93% 的 gain**（`city` 0.365% + `registered_via` 0.255% + `bd` 0.253% + 其餘 0.05%），且這是上界。`registration_init_time` 不受影響，註冊日不會事後變動。
 
-時點已宣告為 `MEMBERS_SNAPSHOT_DATE`，數字會進 M6 的 MODEL_CARD。
+時點已宣告為 `MEMBERS_SNAPSHOT_DATE`，逐欄的數字在 [MODEL_CARD.md](MODEL_CARD.md) §9.1。
 
 ### 六條修正沒有改變任何分數
 
@@ -1090,8 +1090,8 @@ PSI **大小由 epsilon 決定**，所以標記 `epsilon_floored` 並把 epsilon
 
 ### 還沒做的
 
-`MODEL_CARD.md`、Docker、HF Spaces Demo、Kaggle late submission、紅線 4 的
-GroupKFold 四段切分。
+Docker、HF Spaces Demo、Kaggle late submission、紅線 4 的 GroupKFold 四段切分。
+（`MODEL_CARD.md` 已交付，見下一節。）
 
 ---
 
@@ -1209,7 +1209,7 @@ make eda
 ML_kkbox/
 ├── ✅ README.md                  # 你正在讀的檔案
 ├── ✅ SPEC.md                    # 規格書：資料契約、驗證策略、紅線清單
-├── ⬜ MODEL_CARD.md              # 模型用途、限制、已知偏誤 —— M6
+├── ✅ MODEL_CARD.md              # 模型用途、⛔ 不可用於、已知限制、監控盲區、公平性空白
 ├── ✅ Makefile                   # 常用指令索引，`make help` 列出全部
 ├── ✅ pyproject.toml             # uv 管理依賴，依里程碑逐步加入
 ├── ✅ .python-version            # 釘 Python 3.12
@@ -1294,8 +1294,9 @@ ML_kkbox/
 └── ✅ .github/workflows/ci.yml   # ruff + pytest（見下方 CI 的限制）
 ```
 
-`MODEL_CARD.md` 仍未建立。空檔案是雜訊，等到有東西要寫進去時再開 ——
-`src/serving/` 到 M6 才開，同一個理由。
+`src/serving/` 到 M6 才開才建 —— 空的套件目錄是雜訊，等到有東西要放進去時再開。
+`MODEL_CARD.md` 同理：它要等到限制**量出來**才寫得出來（那些數字散在 §7.10、
+§7.15、§7.17）。
 
 ---
 
@@ -1335,7 +1336,7 @@ ML_kkbox/
 - **模型在 Mar 全體 cohort 的平均預測流失率低估約 27%，但該比例不可往下套。** 各風險區間與投放子集的偏差不同，而且 `C_offer` 是固定成本、不隨機率縮放 —— 所以「機率低估 27%」不等於「淨收益低估 27%」。名單自己的偏差要自己量（見「M4 的業務指標」）。成因是 cohort 之間的基準率漂移（Feb 6.39% → Mar 8.99%），校準器只能 fit 在已知標籤的月份，看不到下一個月的漂移。
 - 資料為 2015–2017 年的歷史快照，不反映當前市場狀況。
 - KKBOX 為音樂串流平台，結論外推到影音串流或電信服務時需重新驗證。
-- 完整限制清單見 `MODEL_CARD.md`（M6 交付）。
+- **完整限制清單見 [MODEL_CARD.md](MODEL_CARD.md)** —— 含「⛔ 不可用於」五條、監控的已知盲區、以及群組公平性這個**尚未評估的空白**（不是評估過沒問題）。
 
 ---
 
