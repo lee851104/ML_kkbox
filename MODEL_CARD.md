@@ -117,7 +117,7 @@ transactions 表，本專案沒有。完整 payload 介面不受此限 —— �
 **as-of 截斷是這個專案的核心防線**：所有進入特徵的 `transaction_date` 與
 `user_logs.date` 必須 `<= cutoff`，由 `src/data/cohort.py` 與 `src/features/logs.py`
 的守門函式在**每次執行**時驗證（不是只在測試裡）。八條紅線的清單與狀態見
-[SPEC §5](SPEC.md)；其中紅線 4 仍未實作，見 §9.8。
+[SPEC §5](SPEC.md)；**M6 補上最後一條（紅線 4）之後八條全部實作**，見 §9.8。
 
 **訓練用的標籤只有兩個月**。這限制了很多事：沒有第三個月可以當真正的測試集、
 沒有辦法量「跨季的季節性」、也沒有辦法用「最近一個完整月份」校準（§5）。
@@ -339,7 +339,8 @@ cohort。實測（Mar）：
 | 項目 | 狀態 | 影響 |
 |---|---|---|
 | Apr cohort 的 Kaggle late submission | **提交檔已產生，尚未送出** | 907,471 列在 `reports/kaggle/`（`make kaggle`）。**與 0.10834 可比的唯一數字仍然缺席** —— 事前登記的預期是 **0.17342**（結構相同的本地對照 `feb_fixed → mar_fixed`）。分數回來要填進 README 與 SPEC §3.3，無論結果如何 |
-| 紅線 4：合併 cohort 時的 `GroupKFold(groups=msno)` | 未實作 | 上線前若用 Feb + Mar 全部資料重訓最終模型，**90.81% 的用戶跨兩期出現**，隨機切分會讓同一人同時進訓練與驗證。重訓前必須先補上（[SPEC §7.4](SPEC.md)） |
+| 紅線 4：合併 cohort 時的 `GroupKFold(groups=msno)` | **已實作**（`make final`，[SPEC §7.20](SPEC.md)） | 合併 `feb_fixed + mar_fixed` 重訓的 `catboost_fixed_full` 用四段群組切分產生。違規對照組實測**每折驗證集有 75.2% 的用戶模型已見過**，而兩臂 log loss 只差 0.008 倍折間標準差 —— **量不到，但不表示規定可以省**（理由見 §7.20 第二點）|
+| `catboost_fixed_full` 沒有時間外分數 | **結構性缺席** | 兩個帶標籤的 cohort 都拿去訓練了，本地算不出新的時間外估計。該 artifact 帶 `eval_is_out_of_time: false` 與指回 `catboost_fixed` 的 `out_of_time_reference`。實測**同分布 CV 比時間外樂觀 13.0%**（0.15087 vs 0.17342）—— 引用分數時必須看這一欄 |
 | 群組公平性評估 | 未做 | 見 §10 |
 | Docker / HF Spaces 部署 | 未做 | 服務目前只在本機起過 |
 
@@ -385,7 +386,10 @@ cohort。實測（Mar）：
 
 **重訓前必須確認的三件事**：
 
-1. **紅線 4**：若要合併多個 cohort 重訓，切分必須 `GroupKFold(groups=msno)`（§9.8）
+1. **紅線 4**：若要合併多個 cohort 重訓，切分必須 `GroupKFold(groups=msno)`。已由
+   `scripts/final_model.py` 實作（四段切分全部綁 `msno`，守門每折都跑）—— 合併重訓
+   走那一支，不要自己切（§9.8）。**合併之後就沒有時間外驗證集了**，該 artifact 的
+   本地分數不可與單一 cohort 那幾份比大小
 2. **`cutoff_definition`**：重訓 T−7 版本要用 `--lead-days 7`，`export_model.py` 會
    把它寫進 artifact，而服務會拒絕載入指紋不符的 artifact
 3. **快取的邏輯指紋**：特徵程式改了就要重建快取。`artifact.json` 記了匯出當時的
@@ -403,7 +407,8 @@ cohort。實測（Mar）：
 make artifact-t7   # 匯出上線的 artifact（約 5 分鐘；匯出後自己載回來對答案）
 make serve         # 起 /predict，文件在 http://127.0.0.1:8000/docs
 make drift         # 漂移監控報告 + 圖 16（不重訓）
-make test          # 292 passed · 1 skipped（唯一 skip 的是紅線 4）
+make final         # 合併 cohort 重訓最終模型 + 紅線 4 對照（約 55 分鐘）
+make test          # 324 passed · 0 skipped（八條紅線到齊）
 ```
 
 模型與 metadata 在 `<data_root>/artifacts/catboost_lead7d/`（**不進 git** —— 二進位

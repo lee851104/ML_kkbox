@@ -11,7 +11,7 @@
 
 ---
 
-> ### 🚧 專案狀態：M0–M5 完成，M6 進行中（提前 7 天評分已交付，服務化待做）
+> ### 🚧 專案狀態：M0–M5 完成，M6 進行中（只剩 Docker 與 HF Spaces Demo）
 >
 > 已完成：全部 10 個競賽檔案下載並實測、`src/` 全部資料／特徵／模型模組、
 > EDA 與 8 張圖表、M1 baseline、M2 收聽特徵聚合、M3 四個實驗、
@@ -20,8 +20,10 @@
 > **M4 校準診斷 + isotonic 校準器（結論：不上線）+ 期望淨收益曲線與敏感度熱圖**、
 > **M5 投放名單 + 逐人 Top-3 SHAP 原因碼（帶量測時點標註）**、
 > **M6 的提前 7 天評分版本與分數對照（+18.11%，見下）**、
+> **M6 的 `/predict` 服務與模型 artifact、PSI 漂移監控、Kaggle 提交檔、
+> 合併 cohort 重訓最終模型（紅線 4，見下）**、
 > **兩次獨立洩漏審查（7 + 6 個問題全數修正）**、
-> 測試 **228 passed · 1 skipped**（僅紅線 4 待 M6）、Makefile、GitHub Actions CI。
+> 測試 **324 passed · 0 skipped**（八條紅線到齊）、Makefile、GitHub Actions CI。
 >
 > **表中 M0–M3 的分數全部為實測值**，每一個都可用對應的 `make` 指令重現。
 > M6 尚未產生，標為 ⬜。
@@ -1091,8 +1093,8 @@ PSI **大小由 epsilon 決定**，所以標記 `epsilon_floored` 並把 epsilon
 
 ### 還沒做的
 
-Docker、HF Spaces Demo、紅線 4 的 GroupKFold 四段切分。
-（`MODEL_CARD.md` 已交付，見下一節；Kaggle 管線見「M6 的第四塊」。）
+Docker、HF Spaces Demo。（`MODEL_CARD.md` 已交付；Kaggle 管線見「M6 的第四塊」，
+紅線 4 的 GroupKFold 四段切分見「M6 的第五塊」。）
 
 ---
 
@@ -1169,6 +1171,107 @@ Apr cohort **沒有標籤**（`sample_submission_v2.csv` 的 `is_churn` 全是 0
 
 ---
 
+## M6 的第五塊：紅線 4 —— 量不到的洩漏，與量得到的 13%
+
+`make final` 產生。完整記錄見 [SPEC.md §7.20](SPEC.md)、資料
+[reports/final_model.json](reports/final_model.json)。
+
+到這裡為止的三份 artifact 都只用**單一 cohort** 訓練。上線前的慣例是把所有帶標籤
+的資料都用上，於是合併 `feb_fixed + mar_fixed` 重訓 —— 而**合併的那一秒**，八條
+紅線裡最後一條 ⏸ 的那條就被觸發了。
+
+    1,757,398 列 · 973,588 人 · 其中 783,810 人跨兩期出現（mar_fixed 的 90.11%）
+
+同一個人的 2 月列與 3 月列若被隨機分到訓練與驗證兩邊，驗證分數量到的就有一部分
+是記憶力而不是泛化能力。紅線 4 的規定是：合併之後的任何切分都必須綁 `msno`。
+
+### 違規對照組：75.2% 的驗證集用戶模型已經見過，而分數沒有動
+
+同一份資料、同樣 4 折、同一組超參數，只把 `StratifiedGroupKFold` 換成
+`StratifiedKFold`：
+
+| | log loss | 每折跨邊人數 |
+|---|---|---|
+| 合規 `groups=msno` | 0.150868 ± 0.000614 | **0** |
+| 違規（不看 msno） | 0.150873 ± 0.000544 | **293,797（佔驗證集 75.2%）** |
+| **差** | **−0.000005** | |
+
+**這個差是折間標準差的 0.008 倍 —— 也就是量不到。** 正確的說法是「這個實驗量不
+到」，不是「等於 0」：4 折給出的解析度就是 ±0.0006。
+
+**為什麼兌現不了？** 三件事合起來：
+
+1. **`msno` 不是特徵。** 模型看到 62 個聚合特徵，沒有任何一欄能唯一指認一個人。
+2. **同一個人的兩列不是重複列。** 交易次數、距上次交易天數、年資、收聽特徵全部
+   差一個月，5.22% 的人連標籤都翻轉。它們是**相關的觀測**，不是同一個觀測。
+3. **深度 6 的對稱樹沒有記住個人的容量。** 「記住特徵簽章就能拿分」需要能把單一
+   用戶隔離出來的容量，64 個葉子在 130 萬列上做不到。
+
+⚠️ **這不推翻紅線 4。** 它擋的是一張保險，而這個模型剛好沒有去兌現它 —— 換成高
+容量模型、或對高基數的用戶級欄位做 target encoding（[紅線 6 那條路](#紅線-6-的完整示範同一個錯誤代價差-8-倍)
+實測代價 4.3 倍），同樣的重疊就會被兌現。**遵守的成本是一行 `groups=msno`，而不
+遵守時沒有任何跡象會告訴你這次兌現了沒有。**
+
+### 真正大的那個差在別的地方
+
+| 估計方式 | log loss |
+|---|---|
+| 時間外（`feb_fixed` → `mar_fixed`） | **0.17342** |
+| 合併後同分布 CV | **0.15087** |
+| **同分布估計的樂觀幅度** | **13.0%** |
+
+**紅線 4 守的那個洞是空的（0.008σ），而沒有人守的這個洞是 13%。**
+
+合併重訓用掉了兩個帶標籤的 cohort，本地從此算不出任何新的時間外分數。所以這份
+artifact 的 metadata 帶著 `eval_is_out_of_time: false`，並用 `out_of_time_reference`
+指回上一份 artifact —— 要回答「這個模型有多好」，該引用的仍然是 0.17342。
+
+這與[第三塊的 PSI](#m6-的第三塊psi-漂移監控說一切正常而基準率動了-399) 是同一個形狀：
+**能拿到的數字回報一切正常，而真正在動的量不在監控裡。**
+
+### 四段切分：每一段對應一個決定
+
+| 段 | 列數 | 人數 | 這一段決定什麼 |
+|---|---|---|---|
+| `train` | 1,230,177 | 681,511 | 模型權重 |
+| `es` | 175,741 | 97,359 | 停在第幾輪（1,974） |
+| `sel` | 175,740 | 97,359 | 要不要採用校準器 |
+| `cal` | 175,740 | 97,359 | fit 校準器 |
+
+一塊資料只能承擔一個「看著分數做的決定」。而反過來，**切出來卻用不到的段等於白白
+縮小訓練集**，所以四段各有指定用途。
+
+校準器的結論不變（`sel` log loss 0.15050 → 0.15067，不採用），但這次是從另一個方向
+到達的：同分布之下模型的平均預測 6.749% vs 實際 6.768%（低估 0.28%，而時間外是
+28.8%）—— **isotonic 沒有東西可修**。[M4 那次](#m4-的發現校準器做出來了量完決定不上線)
+判定「失效的成因是 cohort 間的基準率漂移，不是模型本身的機率偏掉」，這是那個因果
+宣稱的獨立檢驗。
+
+### 附帶發現：重訓換掉的不只是模型，還有投放門檻
+
+`p*` 由 `C_offer / (r_save × LTV_saved)` 推導，而 `LTV_saved` 裡的「預期續訂月數」
+= `1 / 月流失率`，取自**訓練 cohort 的流失率**。合併之後那個流失率從 5.8841% 變成
+兩期混合的 6.7682%：
+
+| | 單一 cohort | 合併重訓 |
+|---|---|---|
+| 預期續訂月數 | 16.99 | **14.77** |
+| LTV_saved | 2,205.8 元 | **1,911.6 元** |
+| **投放門檻 `p*`** | 0.4534 | **0.5231（+15.4%）** |
+
+**門檻升高會直接讓投放名單變小，而原因與模型的排序能力完全無關。** 這種變動不會
+有人去找 —— 它藏在一個看起來只跟模型有關的動作（重訓）後面。要用哪一期的流失率
+是一個未定的決定（[SPEC §9](SPEC.md) 第 4 項），改它不必重訓。
+
+### 八條紅線到齊
+
+`tests/test_no_leakage.py` 從此**一條 skip 都不剩**（324 passed · 0 skipped，CI 的
+零 skip 檢查 268 → 288 條）。守門 `assert_groups_disjoint()` 檢查的是**性質**（沒有
+任何 msno 跨段）而不是「你呼叫了哪個類別」—— 靜態檢查擋不住 `groups=df["city"]`
+這種傳錯欄的寫法，而那是最可能的犯法方式：程式看起來完全正確，分數只是變好一點。
+
+---
+
 ## 快速開始
 
 > ⚠️ 依 Kaggle 競賽規則，原始資料**不隨 repo 散布**。請依下列步驟自行下載。
@@ -1234,7 +1337,7 @@ make data-all
 make test
 ```
 
-應為 **304 passed · 1 skipped**，約 85 秒（唯一 skip 的是紅線 4，阻塞里程碑為 M6）。資料尚未下載時測試會 skip 而非 fail —— 剛 clone 完 repo 的人不該看到滿螢幕紅字。
+應為 **324 passed · 0 skipped**，約 40 秒（M6 補上紅線 4 之後，八條紅線各有一個餵違規資料會 raise 的守門測試，清單裡不再有 skip）。資料尚未下載時測試會 skip 而非 fail —— 剛 clone 完 repo 的人不該看到滿螢幕紅字。
 
 `make test-fast` 跳過需掃大檔的測試；`make lint` 跑 ruff 檢查。沒有 make 時對應 `uv run pytest`、`uv run pytest -m "not slow"`、`uv run ruff check .`。
 
@@ -1301,7 +1404,8 @@ ML_kkbox/
 │   ├── ✅ calibration.yaml       # M4 校準切分（seed 刻意與 tuning.yaml 不同）
 │   ├── ✅ multi_seed.yaml        # 配對 multi-seed 的 8 個 seed（事先固定）
 │   ├── ✅ business.yaml          # M4 業務參數（r_save / C_offer / 掃描區間）
-│   └── ✅ serving.yaml           # M6 服務設定（載哪一份 artifact、msno 介面開關）
+│   ├── ✅ serving.yaml           # M6 服務設定（載哪一份 artifact、msno 介面開關）
+│   └── ✅ final_model.yaml       # M6 合併 cohort 重訓（四段比例、CV 折數、違規對照開關）
 ├── ✅ scripts/
 │   ├── ✅ download.py            # Kaggle 下載，內嵌 byte 數契約
 │   ├── ✅ features.py            # M2 收聽行為聚合
@@ -1319,6 +1423,7 @@ ML_kkbox/
 │   ├── ✅ export_model.py        # M6 匯出模型 artifact（含載回來對答案）
 │   ├── ✅ drift_report.py        # M6 PSI 漂移監控（含雜訊地板與標籤漂移對照）
 │   ├── ✅ predict_kaggle.py      # M6 Apr cohort 提交檔（含事前登記的預期）
+│   ├── ✅ final_model.py         # M6 合併 cohort 重訓最終模型（紅線 4 + 違規對照組）
 │   ├── ✅ multi_seed.py          # 配對 multi-seed（雜訊尺度 + 三家比較）
 │   ├── ✅ verify_rebuild.py      # 連續強制重建，驗證逐位元可重現
 │   └── ✅ rebaseline.py          # 在固定基準上重跑 M1–M4 並留紀錄
@@ -1341,6 +1446,8 @@ ML_kkbox/
 │   ├── ✅ models/compare.py      # 三方比較
 │   ├── ✅ models/selection.py    # null importance
 │   ├── ✅ models/tuning.py       # 隨機搜尋
+│   ├── ✅ models/adopted.py      # 正式採用的模型與參數，單一來源
+│   ├── ✅ models/grouped.py      # M6 合併 cohort 的群組切分與守門（紅線 4）
 │   ├── ✅ serving/artifact.py    # M6 artifact 的存與載（三道守門）
 │   ├── ✅ serving/payload.py     # M6 payload → 特徵（轉換一律走 build_features）
 │   ├── ✅ serving/score.py       # M6 機率 + 原因碼（與 M5 同一條歸因路徑）
@@ -1364,7 +1471,8 @@ ML_kkbox/
 │   ├── ✅ test_drift.py          # M6 PSI（箱界來源、旗標欄、缺失箱、雜訊地板）
 │   ├── ✅ test_scoring_date.py   # M6 固定評分日 + 第九條守門（cutoff 超出資料涵蓋）
 │   ├── ✅ test_reverse_validation.py  # 穩健性判定邏輯（σ 門檻）
-│   └── ✅ test_no_leakage.py     # 紅線 1/2/3/5/6/7/8 已實作，僅 4 以 skip 保留（等 M6）
+│   ├── ✅ test_grouped_split.py  # M6 合併／群組切分的純邏輯測試（15 條）
+│   └── ✅ test_no_leakage.py     # 八條紅線，每條都有餵違規資料會 raise 的守門測試
 ├── ✅ notebooks/
 │   └── ✅ eda_01_overview.py     # 僅 EDA，不放訓練邏輯
 ├── ✅ reports/figures/           # 16 張圖表（01–07 + 03b 為 EDA，09–11 M4 校準，12–13 M4 業務指標，14 M5 原因碼，15 M6 提前評分，16 M6 漂移監控）
