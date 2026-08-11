@@ -7,9 +7,10 @@ SPEC §5 開宗明義：「以下任何一條被違反，該版本作廢重做�
 永遠回傳 True 的空檢查也會通過。必須能餵給它一份確實違規的輸入，確認它真的
 會擋下來。下面 test_red_line_1 就是這樣寫的。
 
-目前八條裡只有 4 條寫得出來（1、3、7、8）。另外 4 條依賴還不存在的程式碼 ——
-為不存在的東西寫測試只能寫出假的通過。它們以 skip 保留在清單裡，每次 pytest
-都會提醒還欠幾條，等對應的里程碑做到就填上。
+M0 時八條裡只有 4 條寫得出來（1、3、7、8），另外 4 條依賴還不存在的程式碼 ——
+為不存在的東西寫測試只能寫出假的通過，所以它們以 skip 保留在清單裡，每次
+pytest 都提醒還欠幾條。M1 補上紅線 5、M3 補上 2 與 6，**M6 補上最後的紅線 4**
+（合併 cohort 重訓最終模型時才真的觸發，見 SPEC §7.4 與 §7.20）。八條到齊。
 """
 
 from __future__ import annotations
@@ -29,7 +30,16 @@ from src.features.encoding import (
     fit_target_encoder,
     oof_target_encode,
 )
-from tests.conftest import NODATA, SLOW, make_synthetic_cohort
+from src.models.grouped import (
+    SEGMENTS,
+    assert_groups_disjoint,
+    fold_report,
+    four_way_group_split,
+    grouped_folds,
+    merge_cohorts,
+    random_folds_violating_red_line_4,
+)
+from tests.conftest import NODATA, SLOW, make_synthetic_cohort, make_two_cohorts
 
 # 測試觀察期的上界。SPEC 紅線 7：不得使用 2017-04 之後的任何資料。
 MAX_ALLOWED_DATE = 20170430
@@ -239,10 +249,11 @@ def test_m1_baseline_threshold(feb_cohort, mar_cohort):
 
 
 # ===========================================================================
-# 尚未能實作的四條 —— 依賴還不存在的程式碼
+# M0 當時還寫不出來的四條 —— 紅線 2 / 4 / 5 / 6
 # ===========================================================================
-# 保留在這裡而不是刪掉，是為了讓清單保持完整：每次跑 pytest 都會列出
-# 這四條 skip 與原因，提醒還欠什麼。用 `uv run pytest -ra` 可以看到。
+# 它們曾經以 `@pytest.mark.skip(reason=…)` 掛在這裡，讓每次 pytest 都列出
+# 「還欠哪幾條、被哪個里程碑擋著」。M6 補上紅線 4 之後這份清單清空 ——
+# 一條 skip 都不剩，八條紅線各自有一個餵違規資料會 raise 的守門測試。
 
 
 @NODATA
@@ -291,24 +302,94 @@ def test_red_line_2_real_log_features_are_clean(paths, cohort_name: str):
     assert_logs_within_cutoff(build_log_features(cohort_name, paths, verbose=False))
 
 
-@pytest.mark.skip(reason="紅線 4：改等 M6 —— M3 查明本專案目前沒有合併多 cohort 的地方")
-def test_red_line_4_groupkfold_when_cohorts_merged():
-    """合併多 cohort 做 KFold 時必須用 GroupKFold(groups=msno)。
+@NODATA
+def test_red_line_4_guard_catches_crossing_msno():
+    """守門函式必須擋下同一個 msno 跨段的切分。
 
-    實測 90.81% 的用戶跨兩期出現（見 test_data_contract.test_cohort_overlap）。
-    在合併資料上做隨機切分，會讓同一個人同時出現在訓練與驗證集。
+    這是紅線 4 的「會失敗的測試」本體：手刻一組 c 同時在 train 與 valid 的
+    切分，確認 `assert_groups_disjoint` 真的會 raise。
 
-    **M3 的結論：這條紅線目前無從觸發，阻塞里程碑改為 M6。**
-
-    M3 的三個實驗（模型比較、null importance 篩選、target encoding 對照）
-    全部沿用 §4.2 的 Feb 訓練 → Mar 驗證，沒有任何一處把兩個 cohort 併起來
-    切 fold。而本專案只有兩個帶標籤的 cohort，一旦合併就沒有時間外驗證集
-    可用 —— 合併在 M3 不但沒必要，還會摧毀 §4.2 的切分。
-
-    真正會需要它的是 M6：上線前通常會用「Feb + Mar 全部資料」重訓最終模型，
-    那時若要在合併資料上做任何 KFold，90.81% 的重疊就變成真正的洩漏。
-    測試留在清單裡（而不是刪掉），就是為了在那一刻仍然被 pytest 提醒。
+    守門收的是 msno 而不是 splitter 物件，因為要檢查的性質只跟「誰在哪一段」
+    有關 —— 用什麼工具切的、切幾折都不影響這個判斷，也因此繞不過去。
     """
+    with pytest.raises(AssertionError, match="紅線 4 違反"):
+        assert_groups_disjoint(
+            {
+                "train": pl.Series(["a", "b", "c"]),
+                "valid": pl.Series(["c", "d"]),  # c 兩邊都在
+            }
+        )
+
+
+@NODATA
+def test_red_line_4_guard_accepts_disjoint_split():
+    """真正不重疊的切分要能通過，否則守門太嚴會擋掉正常流程。"""
+    assert_groups_disjoint(
+        {
+            "train": pl.Series(["a", "b"]),
+            "es": pl.Series(["c"]),
+            "sel": pl.Series(["d"]),
+            "cal": pl.Series(["e", "f"]),
+        }
+    )
+
+
+@NODATA
+def test_red_line_4_random_kfold_on_merged_cohorts_is_caught():
+    """合併 cohort 後用不分群的 KFold —— 守門必須抓到。
+
+    這條是紅線 4 的真正內容：它擋的不是一組手刻的壞索引，而是**最自然的
+    那個寫法**。`StratifiedKFold` 在單一 cohort 內部完全正確（M1/M3 一直
+    這樣用），把同一段程式碼套到合併資料上就變成洩漏，而程式碼看起來沒有
+    任何可疑之處。
+    """
+    merged = merge_cohorts(make_two_cohorts())
+    assert merged.n_shared > 0, "合成資料沒有跨期用戶，這個測試會空過"
+
+    tr, va = random_folds_violating_red_line_4(merged, n_splits=4, seed=0)[0]
+    with pytest.raises(AssertionError, match="紅線 4 違反"):
+        assert_groups_disjoint(
+            {
+                "train": merged.fs.msno[pl.Series(tr)],
+                "valid": merged.fs.msno[pl.Series(va)],
+            }
+        )
+
+
+@NODATA
+def test_red_line_4_grouped_kfold_keeps_every_user_on_one_side():
+    """合規的折法：每一折都沒有人跨邊。
+
+    `grouped_folds()` 自己每折都跑守門，所以這裡真正測的是「它沒有把守門
+    關掉」以及「跨邊人數確實是 0」——後者用 `fold_report()` 獨立算一次，
+    不共用守門的邏輯。兩者都通過才算數。
+    """
+    merged = merge_cohorts(make_two_cohorts())
+    folds = grouped_folds(merged, n_splits=4, seed=0)
+
+    report = fold_report(merged, folds)
+    assert report["跨邊人數"].to_list() == [0, 0, 0, 0]
+    # 每一列都要落在某一折的驗證集裡，否則「沒有人跨邊」可以靠少切幾折達成。
+    assert sum(len(va) for _, va in folds) == merged.n_rows
+
+
+@NODATA
+def test_red_line_4_four_way_split_is_disjoint_by_msno():
+    """§7.6 的四段切分：任兩段都不共用 msno，且四段涵蓋每一列。
+
+    紅線 4 的字面規範是 KFold，但**同一個結構出現在四段切分上**：cal 與
+    train 若共用同一個人，校準器就是在模型看過的人身上 fit 的。
+    """
+    merged = merge_cohorts(make_two_cohorts())
+    split = four_way_group_split(
+        merged,
+        {"fractions": {"train": 0.7, "es": 0.1, "sel": 0.1, "cal": 0.1}, "seed": 20260810},
+    )
+
+    assert_groups_disjoint({s: split.segment(s).msno for s in SEGMENTS})
+    assert sum(split.segment(s).X.height for s in SEGMENTS) == merged.n_rows
+    # 跨期用戶必須整組落在同一段 —— 這才是四段切分與「隨機切列」的差別。
+    assert sum(split.segment(s).msno.n_unique() for s in SEGMENTS) == merged.n_groups
 
 
 @NODATA

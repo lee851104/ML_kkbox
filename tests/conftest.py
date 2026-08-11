@@ -12,6 +12,7 @@ import pytest
 
 from src.config import Paths, load_paths
 from src.data import FEB, MAR, CohortSpec, build_cohort
+from src.features import FeatureSet
 
 # 需要掃 1.73 GB 交易檔的測試標成 slow，平常可以用
 #     uv run pytest -m "not slow"
@@ -176,3 +177,54 @@ def make_synthetic_cohort() -> pl.DataFrame:
             "registration_init_time": pl.Int64,
         },
     )
+
+
+def make_two_cohorts(
+    *, n_shared: int = 150, n_only_a: int = 50, n_only_b: int = 50
+) -> dict[str, FeatureSet]:
+    """兩份合成 cohort，其中 `n_shared` 位用戶跨兩期出現 —— 紅線 4 的測試資料。
+
+    紅線 4 要的是「重疊」這個**結構**，不是真實的特徵值，所以 X 只有三欄。
+    但有三件事必須刻意做出來，否則測試會空過：
+
+      - **跨期用戶的標籤會翻轉**（§4.4 實測交集用戶有 5.22% 如此）。全部一樣的話，
+        「同一個人出現在兩邊」看起來就只是重複列，分不出群組切分有沒有生效。
+      - **有只出現在單一 cohort 的人**。四段切分要同時處理 1 列與 2 列的群組，
+        而「群組大小不一」正是群組切分與一般切分行為分歧的地方。
+      - **五種分層標籤都有足夠成員**（1-0 / 1-1 / 2-0 / 2-1 / 2-2），
+        否則 `train_test_split(stratify=…)` 會因為某一類只有一個成員而直接爆。
+
+    全部由索引推導，不用亂數 —— 測試失敗時要能一眼看出是哪一位用戶。
+    """
+    shared = [f"s{i:04d}" for i in range(n_shared)]
+    # 跨期用戶的兩期標籤輪流取這三種組合，對應分層標籤 2-0 / 2-1 / 2-2。
+    pairs = [(0, 0), (0, 1), (1, 1)]
+
+    rows_a = [(m, pairs[i % 3][0]) for i, m in enumerate(shared)]
+    rows_a += [(f"a{i:04d}", i % 2) for i in range(n_only_a)]
+    rows_b = [(m, pairs[i % 3][1]) for i, m in enumerate(shared)]
+    rows_b += [(f"b{i:04d}", i % 2) for i in range(n_only_b)]
+
+    def build(rows: list[tuple[str, int]]) -> FeatureSet:
+        # 依 msno 排序：build_cohort() 的輸出有這個性質，切分邏輯也宣稱不依賴它。
+        # 合成資料照著做，測試才問得出「不依賴」是不是真的。
+        rows = sorted(rows)
+        names = [m for m, _ in rows]
+        labels = [y for _, y in rows]
+        idx = [int(m[1:]) for m in names]
+        return FeatureSet(
+            X=pl.DataFrame(
+                {
+                    "n_tx": pl.Series([1 + i % 17 for i in idx], dtype=pl.Int64),
+                    "price_per_day": pl.Series(
+                        [round(3.3 + (i % 7) * 0.1, 2) for i in idx], dtype=pl.Float64
+                    ),
+                    "last_payment_method_id": pl.Series([36 + i % 5 for i in idx], dtype=pl.Int64),
+                }
+            ),
+            y=pl.Series("is_churn", labels, dtype=pl.Int64),
+            msno=pl.Series("msno", names, dtype=pl.String),
+            categorical=("last_payment_method_id",),
+        )
+
+    return {"feb": build(rows_a), "mar": build(rows_b)}

@@ -7,7 +7,7 @@
 #    效果完全相同 —— 本檔案只是那些指令的集中索引。安裝方式見 README。
 
 .DEFAULT_GOAL := help
-.PHONY: help setup data data-all lint format test test-fast test-ci eda features ablation train compare select encode tune reverse calibrate calibrate-fit multi-seed verify-rebuild rebaseline mlflow clean eval explain lead-time artifact artifact-t7 artifact-fixed serve drift kaggle
+.PHONY: help setup data data-all lint format test test-fast test-ci eda features ablation train compare select encode tune reverse calibrate calibrate-fit multi-seed verify-rebuild rebaseline mlflow clean eval explain lead-time artifact artifact-t7 artifact-fixed final serve drift kaggle
 
 help:
 	@echo "可用目標："
@@ -51,6 +51,7 @@ help:
 	@echo "  artifact-t7 M6 匯出 T−7 的 artifact —— **能上線的那一個**（約 5 分鐘）"
 	@echo "  artifact-fixed M6 匯出固定評分日的 artifact（Kaggle 管線用，約 5 分鐘）"
 	@echo "  serve      M6 起 FastAPI /predict（文件在 /docs）"
+	@echo "  final      M6 合併 cohort 重訓最終模型 + 紅線 4 對照（約 55 分鐘）"
 	@echo "  drift      M6 PSI 漂移監控報告 + 圖 16（約 3 分鐘，不重訓）"
 	@echo "  kaggle     M6 產生 Apr cohort 的 Kaggle 提交檔（不自動提交）"
 
@@ -216,6 +217,18 @@ artifact-t7:
 
 artifact-fixed:
 	uv run python scripts/export_model.py --design fixed
+
+# 上線前的最終模型：合併 feb_fixed + mar_fixed 重訓（紅線 4 的觸發點，SPEC §7.20）。
+#
+# ⚠️ 合併之後**沒有時間外驗證集**了 —— 兩個帶標籤的 cohort 都進了訓練集。這份
+#    artifact 的每一個本地分數都是同分布估計，**不可**與 catboost_fixed 的
+#    0.17342 比大小。實測同分布 CV 樂觀 13.0%。
+#
+# 四段切分（train/es/sel/cal）全部綁 msno，並跑一組違規對照（不看 msno 的
+# StratifiedKFold）量紅線 4 擋掉多少。9 次 CatBoost 訓練，約 55 分鐘；
+# 只要模型不要對照組時加 --no-cv。
+final:
+	uv run python scripts/final_model.py
 
 # 起 /predict 服務。載哪一份 artifact 看 configs/serving.yaml（預設 T−7）。
 # 文件在 http://127.0.0.1:8000/docs —— OpenAPI 就是這個服務的說明書。
