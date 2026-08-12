@@ -1,164 +1,227 @@
 # KKBox 訂閱流失預測與挽回決策系統
 
-> 在有限的挽回預算下，這個月該對哪一批即將到期的訂閱用戶投放資源，才能讓期望淨收益最大？
+> **這個月有 96.9 萬名訂閱者到期，挽回預算只夠發給一小部分人 —— 該發給誰？**
 
-從 **2,298 萬筆**訂閱交易與 **4.1 億列**每日收聽日誌（30.5 GB）中，建構一個輸出**流失機率**與**可解釋流失原因**的模型，並將其轉換為可執行的挽回名單與投放門檻。
+KKBox 是台灣的音樂串流服務。每個月都有一批訂閱到期，其中約 9% 的人不再續訂。挽回他們要花錢（例如送一個月免費，成本 150 元），而**發給所有人一定虧損**：大部分人本來就會續訂，優惠只是白送。所以真正的問題不是「誰會流失」，而是**「發給誰才划算」**。
 
-> 機率的**校準**原本列為交付項目之一。M4 實測後撤下：模型在自己月份上校準得幾乎完美，跨月的低估來自基準率漂移，校準器修不掉它，套上去反而更差。取而代之的是把偏差的**方向與幅度**標註清楚。見下方「M4 的發現」。
+本專案從 **2,298 萬筆**訂閱交易與 **4.1 億列**每日收聽日誌（30.5 GB）出發，交付三樣可以直接接上營運流程的東西：
 
-**資料集**：[WSDM – KKBox's Churn Prediction Challenge](https://www.kaggle.com/competitions/kkbox-churn-prediction-challenge)（WSDM Cup 2018）
-**指標**：Log Loss ｜ **規格書**：[SPEC.md](SPEC.md) ｜ **模型限制**：[MODEL_CARD.md](MODEL_CARD.md)
+| | 交付物 | 實測結果 |
+|---|---|---|
+| **①** | **流失機率** —— 每位到期用戶一個 0~1 的分數 | 時間外 Log Loss **0.17921**，比「對所有人猜同一個數字」好 **41.2%** |
+| **②** | **投放名單** —— 由商業假設推導門檻 `p*`，篩出值得投放的人 | 96.9 萬人中選 **37,174 人（3.83%）**，名單命中率 **83.3%**，期望淨收益 **NT$ 330 萬** |
+| **③** | **原因碼** —— 每個上榜的人，最多三句中文理由 | CatBoost 原生 TreeSHAP 逐人歸因，加總恆等式逐列驗過 |
 
----
+三者由**同一份模型 artifact** 算出：線上 Demo、報告裡的數字、Kaggle 提交檔共用同一個模型檔，不是三個名字一樣的東西。
 
-> ### ✅ 專案狀態：M0–M6 完成，服務已上線
->
-> 已完成：全部 10 個競賽檔案下載並實測、`src/` 全部資料／特徵／模型模組、
-> EDA 與 8 張圖表、M1 baseline、M2 收聽特徵聚合、M3 四個實驗、
-> 一次獨立洩漏審查（7 個問題全數修正）、
-> 一次反向時間外驗證、一次列順序不決定性的修正（兩者都改變過 M3 的結論）、
-> **M4 校準診斷 + isotonic 校準器（結論：不上線）+ 期望淨收益曲線與敏感度熱圖**、
-> **M5 投放名單 + 逐人 Top-3 SHAP 原因碼（帶量測時點標註）**、
-> **M6 的提前 7 天評分版本與分數對照（+18.11%，見下）**、
-> **M6 的 `/predict` 服務與模型 artifact、PSI 漂移監控、Kaggle 提交檔、
-> 合併 cohort 重訓最終模型（紅線 4，見下）**、
-> **兩次獨立洩漏審查（7 + 6 個問題全數修正）**、
-> 測試 **324 passed · 0 skipped**（八條紅線到齊）、Makefile、GitHub Actions CI。
->
-> **表中 M0–M3 的分數全部為實測值**，每一個都可用對應的 `make` 指令重現。
-> M6 尚未產生，標為 ⬜。
->
-> ⚠️ **本專案的 headline 一律是時間外（Mar cohort）分數**，不是 fold 內分數 ——
-> 後者會讓模型看起來好一倍。理由見下方「M1 的發現」。
+**資料集**：[WSDM – KKBox's Churn Prediction Challenge](https://www.kaggle.com/competitions/kkbox-churn-prediction-challenge)（WSDM Cup 2018）　**評分指標**：Log Loss　**規格書**：[SPEC.md](SPEC.md)　**模型限制**：[MODEL_CARD.md](MODEL_CARD.md)
 
 ---
 
-## 成果表
+## 線上 Demo：先看成果
 
-> ⛔ **2026-08-10 更新：下方 M1–M3 的分數是「同日交易定序」修正之前量的，
-> 已作廢。** 新基準經 `make verify-rebuild` 驗證連續兩次強制重建逐位元相同：
->
-> | | 舊值（作廢） | 新值（git `45edfb0`） |
-> |---|---|---|
-> | M1 LightGBM（23 特徵） | ~~0.16299~~ | **0.15925** |
-> | M2 LightGBM（61 特徵） | ~~0.15821~~ | **0.15705** |
-> | M3 CatBoost | ~~0.15685~~ | **0.15367**（−2.16% vs LightGBM） |
-> | M3 XGBoost | ~~0.15949~~ | **0.15726** |
->
-> 成因與逐條結論對照見 [SPEC.md §7.11](SPEC.md)；完整執行紀錄見
-> `reports/rebaseline/`。CatBoost 的優勢從 2.83σ 強化到 7.69σ，並經 8 個配對
-> seed 全勝確認（[§7.12](SPEC.md)）；收聽特徵的價值則從 2.93% 腰斬到 1.38%。
+### 👉 **https://ml-kkbox.onrender.com**
 
-| 階段 | 模型 | 時間外驗證 Log Loss | 相對前一步 | 狀態 |
-|---|---|---|---|---|
-| 基準 | 常數預測（訓練集流失率 6.3923%） | **0.30746** | — | ✅ 已實測 |
-| M1 | LightGBM（交易 + 用戶屬性，23 特徵） | **0.15925** | **−48.2% vs 基準** | ✅ 已重測 |
-| M2 | ＋ 收聽行為聚合特徵（+38 特徵，共 61） | **0.15705** | **−1.38% vs M1** | ✅ 已重測 |
-| M3 | **CatBoost**（四個實驗只有換套件通過驗證） | **0.15367** | **−2.16% vs LightGBM** | ✅ 已重測 |
-| M4 校準 | ＋ isotonic 機率校準（CatBoost） | **0.15955**（未校準同源 0.15388） | **+3.7%** | ⛔ **實測後決定不上線**，見「M4 的發現」 |
-| **M4 業務指標** | 期望淨收益曲線（用 CatBoost） | — | **最佳投放 5.0%** | ✅ **核心交付物已產出**，見「M4 的業務指標」 |
-| **M5 原因碼** | SHAP 歸因（CatBoost 原生 TreeSHAP） | — | **名單 48,853 人 · 逐人 Top-3** | ✅ 已產出，見「M5 的原因碼」。⚠️ 其中 48.79% 的人有一句撐不到 M6 的 T−7 版本 |
-| **M6 部署版** | 提前 7 天評分（`cutoff = 到期日 − 7 天`） | **0.17921** | **+18.11% vs 同群的 0.15173** | 🚧 分數對照已交付，見「M6 的第一塊」。⚠️ 看不到的那批人流失率 70.25% |
-| **M6 Kaggle 管線** | 固定評分日（月底評分，提前 1~31 天，62 特徵） | **0.17342**（`mar_fixed`，常數基準 0.27329） | — | 🚧 提交檔已產生（907,471 列），**尚未送出**。這個數字是 Apr 提交的**事前登記預期**，見「M6 的第四塊」 |
+一個頁面、兩個視角：上半部是**一個人**，下半部是**一整個月**。
 
-M2 的 Feb cohort 內部 5-fold：**0.08344 ± 0.00028**。與時間外分數的差距見下方「M1 的發現」。
+[![Demo 上半部：情境選擇、滑桿、機率與原因碼](reports/figures/17_demo_page.png)](https://ml-kkbox.onrender.com)
 
-⚠️ **M1–M4 的分數重測過三次**：2026-08-08 修掉「cutoff 自己來自未來」的洩漏、2026-08-09 修掉「cohort 列順序不固定」、2026-08-10 修掉「同日交易沒有定序」（見下方三節）。舊數字全部作廢，集中列在 [SPEC.md §7.11](SPEC.md)。
+### 上半部：選一個情境，拉滑桿看機率怎麼動
 
-**參考錨點**（官方私榜最終成績）：🥇 0.07974 ｜ 第 10 名 0.09886 ｜ 第 20 名 0.10834
-
-## 🔗 線上 Demo
-
-### 👉 **https://ml-kkbox.onrender.com** — 視覺化介面
-
-選一個情境，然後拉滑桿看機率怎麼動。從忠誠用戶開始，一次改一個訊號：
+從最安全的用戶開始，一次只改一個訊號：
 
 | 操作 | 流失機率 | 決策 | Top-1 原因 |
 |---|---|---|---|
-| ③ 兩年自動續訂，收聽穩定 | **0.3%** | 不投放 | 最後一筆方案定價 149 元 |
-| └ 關掉自動續訂 | 3.6% | 不投放 | 未開啟自動續訂 +2.15 |
-| └ 再改成已取消 | 30.9% | 不投放 | 到期前最後一筆交易是取消 +3.48 |
-| └ 近 30 天活躍天數歸零 | **74.5%** | **投放** | 到期前最後一筆交易是取消 +3.82 |
+| ③ 低風險：訂了兩年，每天都在聽 | **0.3%** | 不投放 | 最後一筆方案定價 149 元 |
+| └ 關掉自動續訂 | 3.6% | 不投放 | 未開啟自動續訂 |
+| └ 再改成已取消 | 30.9% | 不投放 | 到期前最後一筆交易是取消 |
+| └ 近 30 天活躍天數歸零 | **74.5%** | **投放** | 到期前最後一筆交易是取消 |
 
-頁面下半部是營運視角：本月 969,386 位到期用戶裡，依門檻 `p*` 該投放 **37,174 人（3.83%）**，
-名單命中率 **83.3%**，期望淨收益 **NT$ 3,301,365**。
+⚠️ **請注意第三列**：流失機率已經 30.9%，決策仍然是「不投放」—— 因為投放門檻是 `p* = 48.4%`。**「風險高」與「值得花錢」是兩件事**，而那條分界線正是這個專案要交付的東西。
 
-> 那條門檻 `p* = 成本 ÷ (挽回成功率 × LTV)` **沒有看過任何標籤**，純粹由商業假設推導。
-> 但它的落點與期望淨收益曲線的實測極大值只差 **0.005%**（3,301,365 vs 3,301,188）。
+每拉一次滑桿都會**重新呼叫一次 `POST /predict`**，頁面上沒有任何預先算好的數字。
 
-### 🔧 **https://ml-kkbox.onrender.com/docs** — API 技術文件
+[![Demo 下半部：營運視角與期望淨收益曲線](reports/figures/18_demo_page.png)](https://ml-kkbox.onrender.com)
 
-Swagger UI。點 **POST /predict** → **Try it out** → 下拉選單挑情境 → **Execute**。
-同樣五個範例，但看得到完整的請求／回應結構與所有欄位定義。
+### 下半部：同一個模型套到整個月
 
-| 範例 | 輸出機率 | 該不該投放挽回優惠 |
+本月 969,386 位到期用戶，依門檻 `p*` 該投放 **37,174 人（3.83%）**，名單命中率 **83.3%**，期望淨收益 **NT$ 3,301,365**。曲線右半段一路往下 —— **撒給全部人是負的**。
+
+> 那條門檻 `p* = 成本 ÷ (挽回成功率 × LTV)` **沒有看過任何標籤**，純粹由三個商業假設推導。但它的落點與期望淨收益曲線的實測極大值只差 **NT$ 177（0.005%）**。
+
+### 🔧 API 技術文件：**https://ml-kkbox.onrender.com/docs**
+
+Swagger UI。點 **POST /predict** → **Try it out** → 下拉選單挑情境 → **Execute**，看得到完整的請求／回應結構與所有欄位定義：
+
+| 範例情境 | 輸出機率 | 該不該投放挽回優惠 |
 |---|---|---|
-| ① 最後一筆交易已取消 | **0.8253** | ✅ 投放，期望淨收益 +106 元 |
-| ⑤ 沒有收聽資料 | 0.7502 | ✅ 投放，+83 元 |
-| ② 自動續訂關閉，正在流失興趣 | 0.1997 | ❌ 不投放，−88 元 |
-| ④ 首次到期的新客 | 0.0270 | ❌ 不投放，−142 元 |
-| ③ 兩年自動續訂，收聽穩定 | **0.0031** | ❌ 不投放，−149 元 |
+| ① 高風險：已經按過取消 | **0.8253** | ✅ 投放，期望淨收益 +106 元 |
+| ⑤ 沒有收聽資料：看服務怎麼說實話 | 0.7502 | ✅ 投放，+83 元 |
+| ② 中風險：還沒退訂，但已經不用了 | 0.1997 | ❌ 不投放，−88 元 |
+| ④ 新客：整群很危險，不代表每個人都危險 | 0.0270 | ❌ 不投放，−142 元 |
+| ③ 低風險：訂了兩年，每天都在聽 | **0.0031** | ❌ 不投放，−149 元 |
 
-> ⏱️ **首次載入約需 50 秒。** 免費方案閒置 15 分鐘後會休眠，第一個請求要等容器冷啟動。
-> 之後的請求約 0.3 秒。
+範例 ④ 刻意留著一個看起來「不合理」的輸出：新客這一群的平均流失率是 39.84%，但這一位遠低於此 —— 因為他的自動續訂開著。**把群體基礎率當成個體預測，挽回名單就退化成一條不需要機器學習的規則**，所以說明裡直接寫出這個落差，而不是掩蓋它。
+
+> ⏱️ **首次載入約需 50 秒。** 免費方案閒置 15 分鐘會休眠，第一個請求要等容器冷啟動；之後每個請求約 0.3 秒。
 >
-> 📋 **範例資料是合成的**，不是真實用戶 —— 依競賽規則，KKBox 資料與其衍生特徵不得散布
-> （見 [MODEL_CARD.md](MODEL_CARD.md) 的授權聲明）。數值依本 README 已公開的分群統計手造，
-> 產生方式見 [src/serving/examples.py](src/serving/examples.py)。
+> 📋 **範例資料是合成的**，不是真實用戶 —— 依競賽規則，KKBox 資料與其衍生特徵不得散布（見 [MODEL_CARD.md](MODEL_CARD.md) 的授權聲明）。數值依本 README 已公開的分群統計手造，產生方式見 [src/serving/examples.py](src/serving/examples.py)。
 >
-> ❓ **為什麼不是 Hugging Face Spaces？** 手冊第 5 條硬性規定寫「部署到 HF Spaces（免費）」，
-> 但 HF 在 2026-08 改制：Docker 與 Gradio Space 需要 PRO 訂閱，只有 Static Space 免費。
-> 本專案改用平台中立的容器部署，`Dockerfile` 同一份可直接搬回 HF。理由與各平台的
-> 部署步驟見 [deploy/README.md](deploy/README.md)。
+> ❓ **為什麼不是 Hugging Face Spaces？** 手冊第 5 條硬性規定寫「部署到 HF Spaces（免費）」，但 HF 在 2026-08 改制：Docker 與 Gradio Space 需要 PRO 訂閱，只有 Static Space 免費。本專案改用平台中立的容器部署，同一份 `Dockerfile` 可直接搬回 HF。理由與各平台步驟見 [deploy/README.md](deploy/README.md)。
+
+---
+
+## 成果總表
+
+⚠️ **本專案的 headline 一律是時間外分數**（2 月訓練、3 月驗證），不是 fold 內分數 —— 後者會讓模型看起來好一倍（0.083 vs 0.157）。理由見 [M1 的發現](#m1-的發現)。
+
+| 階段 | 做了什麼 | 時間外 Log Loss | 相對前一步 | 詳見 |
+|---|---|---|---|---|
+| 基準 | 常數預測（訓練集流失率 6.3923%） | 0.30746 | — | |
+| **M1** | LightGBM ＋ 交易與用戶屬性 23 特徵 | **0.15925** | **−48.2%** vs 基準 | [→](#m1-的發現) |
+| **M2** | ＋ 收聽行為聚合 38 特徵（共 61） | **0.15705** | −1.38% | [→](#m2-的發現38-個收聽特徵只換來-14) |
+| **M3** | 換 **CatBoost**（四個實驗只有這一個站得住） | **0.15367** | −2.16% | [→](#m3-的發現四個實驗只有換套件站得住) |
+| M4 | ＋ isotonic 機率校準 | 0.15955 | **+3.7%（變差）→ 不上線**<br>對照同源未校準 0.15388 | [→](#m4-的發現校準器做出來了量完決定不上線) |
+| **M6** | **提前 7 天評分 —— 唯一能上線的那一個** | **0.17921** | **+18.11%**<br>對照同一批人的 T=0 分數 0.15173 | [→](#m6-的第一塊提前-7-天評分要付多少代價) |
+
+**為什麼「能上線」的那個分數反而最差？** 前五列都是「在到期日當天評分」算出來的，而挽回優惠必須提前寄出才來得及。把評分時點提前 7 天，模型就看不到到期日當天那筆續訂或取消 —— 退步 18.11% 是**換取可部署性的價格**，不是模型變爛。上線用的是 0.17921 那一個，Demo 上跑的也是它。
+
+### 分數之外的交付物
+
+| 交付物 | 實測數字 | 詳見 |
+|---|---|---|
+| 期望淨收益曲線 ＋ 敏感度熱圖 | 最佳投放 5.0%，48 組假設裡 42 組為正 | [→](#m4-的業務指標核心交付物) |
+| 投放名單 ＋ 逐人 Top-3 原因碼 | 48,853 人、145,796 句候選，全部可稽核 | [→](#m5-的原因碼名單上的每個人為什麼在上面) |
+| `/predict` 服務 ＋ 模型 artifact | 三道載入守門，存載容差 **0** | [→](#m6-的第二塊predict-服務與模型-artifact) |
+| PSI 漂移監控 | 監控全報「穩定」，而基準率動了 39.9% | [→](#m6-的第三塊psi-漂移監控說一切正常而基準率動了-399) |
+| Kaggle 提交檔 | 907,471 列，事前登記預期 0.17342 | [→](#m6-的第四塊kaggle-提交檔以及往前七天會看到三月這個提醒) |
+| 合併 cohort 重訓最終模型 | 八條紅線到齊，同分布估計樂觀 13.0% | [→](#m6-的第五塊紅線-4量不到的洩漏與量得到的-13) |
+
+> ⚠️ **兩個「最佳投放比例」不是同一個數字。** M4 的 5.0% 算在 T=0 模型上，Demo 顯示的 3.83% 算在 T−7 上線模型上 —— 不同模型、不同名單、不同門檻，不可互換引用。
+
+**參考錨點**（官方私榜最終成績）：🥇 0.07974 ｜ 第 10 名 0.09886 ｜ 第 20 名 0.10834。
+
+⚠️ 但那些分數算在 **Apr cohort** 上，本專案上表算在 **Mar cohort** 上 —— **不同的資料集，直接比大小沒有意義**。列出來是為了說明「為什麼不能比」，不是拿來對標的目標。
+
+要得到可比的數字得送 Kaggle late submission；課程手冊未要求提交，所以本專案交付的是**推論管線與提交檔本身**（907,471 列，已產生並通過品質檢查），並事前登記了預期分數 —— 見 [M6 的第四塊](#m6-的第四塊kaggle-提交檔以及往前七天會看到三月這個提醒)。
+
+---
+
+## 專案狀態
+
+**M0–M6 全部完成，服務已上線。** 下面每一節的數字都可以用對應的 `make` 指令重現（指令表見[快速開始](#快速開始)）。
+
+| | 內容 |
+|---|---|
+| **資料** | 官方 10 個競賽檔案全部下載並實測；`user_logs` 合計 410,502,905 列 / 31.9 GB |
+| **程式** | `src/` 分資料／特徵／模型／評估／解釋／服務六層，22 個 `scripts/` 進入點 |
+| **測試** | **360 passed · 0 skipped**（約 80 秒）；八條紅線各有一個「餵違規資料會 raise」的守門測試 |
+| **CI** | GitHub Actions：ruff ＋ pytest，其中 288 條純邏輯測試要求**零 skip**（見 [CI 驗證了什麼](#ci-驗證了什麼以及沒驗證什麼)） |
+| **部署** | Docker 容器上線於 Render：視覺化首頁 ＋ `/predict` ＋ Swagger 文件 |
+| **文件** | [SPEC.md](SPEC.md)（資料契約、驗證策略、八條紅線）、[MODEL_CARD.md](MODEL_CARD.md)（用途、⛔ 不可用於、監控盲區） |
+
+### 三件被自己的實測推翻的計畫
+
+這個專案有三次「做完之後推翻原本的規劃」。三次的程式碼與負面結果都留在 repo 裡：
+
+| 原本的計畫 | 實測結果 | 處置 |
+|---|---|---|
+| M4 用 isotonic 校準把機率修準 | 每一項指標都變差，而且把機率最低的 57% 壓成同一個值 | **不上線**，改為標註偏差的方向與幅度 |
+| Null importance 砍掉 39% 贏不過雜訊的特徵 | Feb 內部改善 0.42%，時間外**退步** 0.78% | **61 個特徵全留** |
+| 自建 2016-12／2017-01 的歷史 cohort | 只還原 86% 的人，標籤一致率 98.77%，定義與官方不同 | **不採用**，五次負面實驗留在 [src/data/labeller.py](src/data/labeller.py) |
+
+### 分數重測過三次
+
+⚠️ M1–M4 的分數**全部重測過三次**，起因都不是模型或特徵，而是資料管線：
+
+| 日期 | 起因 | 影響 |
+|---|---|---|
+| 2026-08-08 | cutoff 自己來自未來（[詳見](#m3-期間修掉的-7-個洩漏風險)） | 分數變差 0.56%，方向正確 |
+| 2026-08-09 | cohort 列順序不固定（[詳見](#一個-bug-讓所有分數都不可重現)） | 雜訊底線 0.7σ，M3 的結論因此翻轉 |
+| 2026-08-10 | 同日交易沒有定序 | 見下表 |
+
+| | 舊值（作廢） | 現行值（git `45edfb0`） |
+|---|---|---|
+| M1 LightGBM（23 特徵） | ~~0.16299~~ | **0.15925** |
+| M2 LightGBM（61 特徵） | ~~0.15821~~ | **0.15705** |
+| M3 CatBoost | ~~0.15685~~ | **0.15367** |
+| M3 XGBoost | ~~0.15949~~ | **0.15726** |
+
+新基準經 `make verify-rebuild` 驗證「連續兩次強制重建逐位元相同」。CatBoost 的優勢從 2.83σ 強化到 7.69σ 並經 8 個配對 seed 全勝確認；收聽特徵的價值則從 2.93% 腰斬到 1.38%。完整對照見 [SPEC.md §7.11](SPEC.md)，執行紀錄見 `reports/rebaseline/`。
 
 ---
 
 ## 架構
 
+從 34 GB 原始檔案到一個可以回答「該投放給誰」的服務，中間有四層。**紅色那一格是全案的防洩漏核心**，灰色虛線那一格是實測後撤掉的。
+
 ```mermaid
-flowchart LR
-    subgraph SRC["原始資料 (configs/paths.yaml 指定, 不進 Git)"]
+%%{init:{'flowchart':{'rankSpacing':28,'nodeSpacing':22,'padding':6,'subGraphTitleMargin':{'top':2,'bottom':2}}}}%%
+flowchart TD
+    subgraph SRC["① 原始資料　·　34 GB　·　依競賽規則不進 Git"]
+        direction LR
         T["transactions + v2<br/>2,298 萬列"]
-        L["user_logs + v2<br/>4.1 億列 · 30.5 GB"]
-        M["members_v3<br/>677 萬列 · 11.66% cohort 查無"]
+        L["user_logs + v2<br/>4.1 億列 · 31.9 GB"]
+        M["members_v3<br/>677 萬列"]
         Y["train / train_v2<br/>is_churn 標籤"]
     end
 
-    subgraph ETL["資料層 · Polars lazy / DuckDB"]
-        CUT["as-of 截斷<br/>date &le; membership_expire_date"]
-        AGG["聚合為每位用戶一列<br/>近 7/14/30/90 天行為"]
+    subgraph ETL["② 資料層　·　Polars lazy execution"]
+        direction LR
+        CUT["🔒 as-of 截斷<br/>date ≤ cutoff"]
+        AGG["聚合成每人一列<br/>4.1 億 → 6,900 萬列 · 32 秒"]
+        FEAT["61 個特徵<br/>交易 23 ＋ 收聽 38"]
     end
 
-    subgraph MODEL["模型層"]
-        BASE["LightGBM baseline"]
-        CMP["LGBM / XGB / CatBoost<br/>+ null importance 篩選"]
-        CAL["Isotonic 校準<br/>⛔ 實測後不上線"]
+    subgraph MODEL["③ 模型層　·　時間外驗證 Feb → Mar"]
+        direction LR
+        CMP["三方比較<br/>CatBoost 配對 8 seed 全勝"]
+        T7["提前 7 天重訓<br/>0.17921　能上線的那一個"]
+        CAL["Isotonic 校準<br/>⛔ 量完決定不上線"]
     end
 
-    subgraph OUT["決策層"]
-        SHAP["SHAP 原因碼<br/>Top-3 流失因素"]
-        ROI["期望淨收益曲線<br/>最佳投放門檻"]
-        API["FastAPI /predict<br/>+ PSI 漂移監控"]
+    subgraph OUT["④ 決策層　·　把機率換成行動"]
+        direction LR
+        ROI["期望淨收益曲線<br/>最佳投放 3.83%"]
+        SHAP["SHAP 原因碼<br/>逐人 Top-3 理由"]
+        DRIFT["PSI 漂移監控<br/>穩定 ≠ 還準"]
     end
+
+    API["🚀 FastAPI · Docker · ml-kkbox.onrender.com<br/>視覺化首頁 ／ POST /predict ／ Swagger 文件"]
 
     T --> CUT
     L --> CUT
     M --> AGG
-    Y --> BASE
-    CUT --> AGG
-    AGG --> BASE --> CMP --> CAL
-    CAL --> SHAP
-    CAL --> ROI
-    SHAP --> API
+    CUT --> AGG --> FEAT
+    Y --> CMP
+    FEAT --> CMP --> T7 -.-> CAL
+    T7 --> ROI
+    T7 --> SHAP
+    T7 --> DRIFT
     ROI --> API
+    SHAP --> API
+    DRIFT --> API
 
-    style CUT fill:#fee,stroke:#c00,stroke-width:2px
-    style CAL fill:#eee,stroke:#999,stroke-width:2px,stroke-dasharray: 5 3
+    classDef lvSrc fill:#f8fafc,stroke:#94a3b8,color:#334155
+    classDef lvEtl fill:#eff6ff,stroke:#3b82f6,color:#1e3a5f
+    classDef lvMdl fill:#f5f3ff,stroke:#8b5cf6,color:#3b0764
+    classDef lvDec fill:#fff7ed,stroke:#f97316,color:#7c2d12
+    classDef lvGate fill:#fee2e2,stroke:#dc2626,stroke-width:3px,color:#7f1d1d
+    classDef lvDead fill:#f1f5f9,stroke:#94a3b8,stroke-dasharray:5 4,color:#64748b
+    classDef lvLive fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#14532d
+
+    class T,L,M,Y lvSrc
+    class AGG,FEAT lvEtl
+    class CMP,T7 lvMdl
+    class ROI,SHAP,DRIFT lvDec
+    class CUT lvGate
+    class CAL lvDead
+    class API lvLive
 ```
 
-紅框的 **as-of 截斷**是本專案的防洩漏核心，理由見 [SPEC.md §4.3](SPEC.md) 與 [§5](SPEC.md)。
+**🔒 紅框的 as-of 截斷**是本專案的防洩漏核心：標籤是「到期後 30 天內有沒有新交易」，而資料裡就有那 30 天。任何跨越到期日的切分都會洩漏，所以每一欄特徵都必須只由 cutoff 當下已經發生的事算出來。理由見 [SPEC.md §4.3](SPEC.md) 與 [§5](SPEC.md)。
 
-灰框的**機率校準**原本是把模型輸出換算成金額的前提，**M4 實測後撤下** —— 校準器已實作並量測完畢（`make calibrate-fit`），結論是套上去讓每一項指標都變差，因此流程實際走的是 `CMP → SHAP / ROI`。保留在圖上是因為「為什麼不校準」需要有地方解釋；見下方「M4 的發現」與 [SPEC.md §7.10](SPEC.md)。
+**灰色虛線的機率校準**原本是把模型輸出換算成金額的前提，**M4 實測後撤下** —— 校準器已實作並量測完畢（`make calibrate-fit`），結論是套上去讓每一項指標都變差。流程實際走的是 `T7 → ROI / SHAP / DRIFT`；保留在圖上是因為「為什麼不校準」需要有地方解釋，見[M4 的發現](#m4-的發現校準器做出來了量完決定不上線)與 [SPEC.md §7.10](SPEC.md)。
 
 ---
 
@@ -244,6 +307,8 @@ flowchart LR
 
 ### 分數穩定，但外推時掉一倍
 
+> 📌 **這張表是 `make train` 的當前輸出，也就是 61 特徵版（＝ M2 模型）。** `scripts/train.py` 會把已經算好的收聽特徵一併吃進去，所以在 M2 完成之後重跑，拿到的是 0.15705 而不是 M1 自己的 0.15925。兩者的**時間外分數對照見[成果總表](#成果總表)**；這一節要講的是「fold 內與時間外差一倍」這個現象，而它在兩個版本上都成立。
+
 | | log loss |
 |---|---|
 | Feb cohort 內部 5-fold | **0.08344 ± 0.00028** |
@@ -287,7 +352,7 @@ flowchart LR
 
 ---
 
-## M2 的發現：38 個收聽特徵只換來 2.9%
+## M2 的發現：38 個收聽特徵只換來 1.4%
 
 `make features && make train` 產生。實作見 [src/features/logs.py](src/features/logs.py)。
 
@@ -303,7 +368,7 @@ flowchart LR
 
 反過來寫 —— 先 join 再 filter —— 需要把 4 億列的中間結果放進記憶體，那才是會 OOM 的寫法。
 
-### 但模型分數只改善 2.9%
+### 但模型分數只改善 1.4%
 
 | | M1 | M2 | 變化 |
 |---|---|---|---|
@@ -354,20 +419,20 @@ Feb 幾乎無差異，Mar 方向甚至相反。合理解釋：這些多半是**�
 
 模型也同意：`log_has_logs` 這個特徵的 gain 是 **0**，一次都沒被用到。
 
-**二、這個結果本身就是交付物。** 花了 31.9 GB 的處理只換來 3.1%，聽起來像失敗，但它回答了一個真實的業務問題：**對這個資料集而言，「有沒有付錢的意願」比「有沒有在使用」更能預測續訂。** `last_is_cancel` 與 `last_is_auto_renew` 合計 54.4% 的 gain，收聽行為全部加起來只有 11%。
+**二、這個結果本身就是交付物。** 花了 31.9 GB 的處理只換來 1.4%，聽起來像失敗，但它回答了一個真實的業務問題：**對這個資料集而言，「有沒有付錢的意願」比「有沒有在使用」更能預測續訂。** `last_is_cancel` 與 `last_is_auto_renew` 合計 54.4% 的 gain，收聽行為全部加起來只有 11%。
 
 ### 消融實驗：確認要不要繼續投資
 
 `make ablation` 產生（[scripts/ablation.py](scripts/ablation.py)）。七次訓練，全部以時間外 Mar 分數比較。
 
-| 實驗 | 特徵數 | Mar log loss | 相對 M1 | 每特徵效率 |
+| 實驗 | 特徵數 | Mar log loss | 相對 M1 | 每新增特徵效率 |
 |---|---|---|---|---|
 | `txn_only`（M1 對照） | 23 | 0.15925 | — | — |
-| **`log_only`（無交易特徵）** | 38 | **0.29724** | **+82.4%** | — |
-| txn + recency | 25 | 0.16008 | −1.79% | 0.894% |
-| txn + **recency** | 25 | 0.16008 | −1.79% | **0.894%** |
-| txn + frequency | 31 | 0.16039 | −1.60% | 0.199% |
-| txn + intensity | 47 | 0.15768 | −3.26% | 0.136% |
+| **`log_only`（無交易特徵）** | 38 | **0.29724** | **+86.6%** | — |
+| txn + **recency** | 25 | 0.15813 | −0.70% | **0.352%** |
+| txn + frequency | 31 | 0.15809 | −0.73% | 0.091% |
+| txn + intensity | 47 | 0.15726 | −1.25% | 0.052% |
+| txn + trend | 26 | 0.15878 | −0.30% | 0.098% |
 | `all`（M2 對照） | 61 | 0.15705 | −1.38% | 0.036% |
 
 **結論一：收聽行為沒有獨立訊號。** `log_only` 是 0.29724，而「對所有人預測同一個數字」的常數基準是 0.30746 —— **38 個特徵、400 輪，只贏了 3.3%**。收聽資料單獨使用幾乎等於什麼都不知道。
@@ -376,7 +441,7 @@ Feb 幾乎無差異，Mar 方向甚至相反。合理解釋：這些多半是**�
 
 **結論三：EDA 的預測是錯的，而這是最有價值的一課。**
 
-根據 M0 的 EDA，我預期 **trend 最強**（它是唯一在兩個 cohort 方向一致的），**intensity 最弱**（它在 Mar 完全平坦）。實測**完全相反** —— intensity 最強（−3.26%），trend 反而與 frequency 並列最弱（−1.60%）。
+根據 M0 的 EDA，我預期 **trend 最強**（它是唯一在兩個 cohort 方向一致的），**intensity 最弱**（它在 Mar 完全平坦）。實測**完全相反** —— intensity 最強（−1.25%），trend 是四組裡最弱的（−0.30%）。
 
 原因是 EDA 看的是**單變量**流失率分箱，而模型是**在 23 個交易特徵已經存在的條件下**使用這些特徵。單變量漂亮不代表有增量貢獻，可能那份資訊交易特徵早就有了；單變量平坦也不代表沒用，它可能在條件上仍能切開。
 
@@ -627,7 +692,7 @@ tx.filter(membership_expire_date 落在到期區間)
 
 第 2–4 項是同一個模式：守門只寫在「正常路徑」上，而快取命中與公開 API 都繞過了它。**快取是一個 parquet 檔，不是一個保證。**
 
-> ⚠️ **尚未解決**：守門驗證的是「洩漏」，不是「過時」。修正 cutoff 之後舊快取依然能通過所有守門（它們確實沒有洩漏），只是算法已經不同 —— 這次是靠人工強制重建的。真正的解法是在快取裡寫入涵蓋程式碼版本的指紋，列為 M4 待辦。
+> ✅ **這條後來補上了**：守門驗證的是「洩漏」，不是「過時」。修正 cutoff 之後舊快取依然能通過所有守門（它們確實沒有洩漏），只是算法已經不同 —— 當時是靠人工強制重建的。現在 `src/fingerprint.py` 會把產生快取那支模組的原始碼（剝掉 docstring 與註解、正規化成 AST）算成**邏輯指紋**寫進快取，命中時比對不合就自動重算。守門測試見 [tests/test_cache_fingerprint.py](tests/test_cache_fingerprint.py)。
 
 ---
 
@@ -991,7 +1056,7 @@ T=0 時大量用戶的 `days_since_last_tx` 是 0 或 1（到期日當天那筆�
 
 ---
 
-## M6 的第二塊：`/predict` 與模型 artifact
+## M6 的第二塊：/predict 服務與模型 artifact
 
 ```bash
 make artifact-t7   # 匯出能上線的那個模型（T−7）
@@ -1231,13 +1296,20 @@ Apr cohort **沒有標籤**（`sample_submission_v2.csv` 的 `is_churn` 全是 0
     預測平均 5.19%（中位數 1.29%、p99 59.1%）· 超過 p* = 0.4534 的 2.46%
     分數 PSI vs mar_fixed = 0.0059（唯一拿得到的品質檢查 —— 那不是分數）
 
-**事前登記：Apr 的提交分數應與 0.17342 同一量級。** 先印預期再算分數，順序有意義。
-提交本身不自動化（要接受競賽規則，是帳號層級的動作），腳本只印出指令 —— 分數回來
-之後填進上面的成果表與 [SPEC §3.3](SPEC.md)，**無論結果如何**。
+**事前登記：Apr 的提交分數應與 0.17342 同一量級。** 先印預期再算分數，順序有意義 ——
+一個事後才寫下來的預期，永遠會剛好等於實際發生的事。
+
+> 📌 **送不送出是選配。** 課程手冊未要求提交 Kaggle，所以本專案的交付止於**推論管線
+> 與提交檔本身**：能對一個沒有標籤、且評分時點落在資料邊界之外的 cohort 產生合規預測，
+> 這件事的工程內容與分數無關。提交本身也不自動化 —— 要先接受競賽規則，那是帳號層級的
+> 動作，腳本只印出指令。
+>
+> 若日後送出，分數會填進[成果總表](#成果總表)與 [SPEC §3.3](SPEC.md)，**無論結果如何**
+> —— 事前登記的意義就在這裡。
 
 ---
 
-## M6 的第五塊：紅線 4 —— 量不到的洩漏，與量得到的 13%
+## M6 的第五塊：紅線 4，量不到的洩漏與量得到的 13%
 
 `make final` 產生。完整記錄見 [SPEC.md §7.20](SPEC.md)、資料
 [reports/final_model.json](reports/final_model.json)。
@@ -1331,8 +1403,8 @@ artifact 的 metadata 帶著 `eval_is_out_of_time: false`，並用 `out_of_time_
 
 ### 八條紅線到齊
 
-`tests/test_no_leakage.py` 從此**一條 skip 都不剩**（324 passed · 0 skipped，CI 的
-零 skip 檢查 268 → 288 條）。守門 `assert_groups_disjoint()` 檢查的是**性質**（沒有
+`tests/test_no_leakage.py` 從此**一條 skip 都不剩**（全套件 360 passed · 0 skipped，
+CI 的零 skip 檢查 268 → 288 條）。守門 `assert_groups_disjoint()` 檢查的是**性質**（沒有
 任何 msno 跨段）而不是「你呼叫了哪個類別」—— 靜態檢查擋不住 `groups=df["city"]`
 這種傳錯欄的寫法，而那是最可能的犯法方式：程式看起來完全正確，分數只是變好一點。
 
@@ -1403,7 +1475,7 @@ make data-all
 make test
 ```
 
-應為 **324 passed · 0 skipped**，約 40 秒（M6 補上紅線 4 之後，八條紅線各有一個餵違規資料會 raise 的守門測試，清單裡不再有 skip）。資料尚未下載時測試會 skip 而非 fail —— 剛 clone 完 repo 的人不該看到滿螢幕紅字。
+應為 **360 passed · 0 skipped**，約 80 秒（M6 補上紅線 4 之後，八條紅線各有一個餵違規資料會 raise 的守門測試，清單裡不再有 skip）。資料尚未下載時測試會 skip 而非 fail —— 剛 clone 完 repo 的人不該看到滿螢幕紅字。
 
 `make test-fast` 跳過需掃大檔的測試；`make lint` 跑 ruff 檢查。沒有 make 時對應 `uv run pytest`、`uv run pytest -m "not slow"`、`uv run ruff check .`。
 
@@ -1436,19 +1508,22 @@ make eda
 | `make verify-rebuild` | 連續強制重建兩次，驗證逐位元一致 | 約 6 分鐘 |
 | `make artifact` | M6 · 匯出模型 artifact（T=0，離線基準） | 約 5 分鐘 |
 | `make artifact-t7` | M6 · 匯出 T−7 的 artifact —— **能上線的那一個** | 約 5 分鐘 |
-| `make serve` | M6 · 起 FastAPI `/predict`（文件在 `/docs`） | 立即 |
+| `make serve` | M6 · 起 FastAPI（Demo 首頁在 `/`，文件在 `/docs`） | 立即 |
 | `make drift` | M6 · PSI 漂移監控報告 + 圖 16（不重訓） | 約 3 分鐘 |
 | `make artifact-fixed` | M6 · 匯出固定評分日的 artifact（Kaggle 管線用） | 約 6 分鐘 |
 | `make kaggle` | M6 · 產生 Apr cohort 的提交檔（**不自動提交**） | 約 3 分鐘 |
+| `make final` | M6 · 合併 cohort 重訓最終模型（紅線 4 + 違規對照組） | 約 30 分鐘 |
 
 `make serve` 需要先有 artifact —— 沒有就**啟動失敗**，不會起一個沒有模型的服務。
 後者會在第一筆請求時才壞，而那通常是在別人的 Demo 上。
+
+起好之後打開 <http://127.0.0.1:8000/> 就是與線上 Demo 相同的視覺化頁面。首頁的營運視角資料由 [scripts/demo_curve.py](scripts/demo_curve.py) 產生（需要本機資料），部署時作為靜態 JSON 一起打包。
 
 ---
 
 ## Repository 結構
 
-✅ 已建立　⬜ 規劃中（於標註的里程碑建立，**不預先開空目錄**）
+✅ 已建立　🚫 不進 Git。**目錄一律等到有東西要放進去才開** —— 空的套件目錄是雜訊，所以 `src/serving/` 到 M6 才出現。
 
 ```
 ML_kkbox/
@@ -1460,6 +1535,8 @@ ML_kkbox/
 ├── ✅ .python-version            # 釘 Python 3.12
 ├── ✅ uv.lock                    # 精確版本，跨機器一致
 ├── ✅ .gitignore                 # 排除 /data/ /models/ kaggle.json configs/paths.yaml
+├── ✅ Dockerfile                 # M6 推論容器（只裝推論依賴，不含訓練套件）
+├── ✅ deploy/                    # M6 部署：requirements.txt、serving.yaml、artifact、平台步驟
 ├── ✅ configs/
 │   ├── ✅ paths.example.yaml     # 路徑範本（進 Git）
 │   ├── 🚫 paths.yaml             # 機器專屬設定（不進 Git）
@@ -1490,11 +1567,14 @@ ML_kkbox/
 │   ├── ✅ drift_report.py        # M6 PSI 漂移監控（含雜訊地板與標籤漂移對照）
 │   ├── ✅ predict_kaggle.py      # M6 Apr cohort 提交檔（含事前登記的預期）
 │   ├── ✅ final_model.py         # M6 合併 cohort 重訓最終模型（紅線 4 + 違規對照組）
+│   ├── ✅ demo_curve.py          # M6 Demo 首頁的營運視角資料（期望淨收益曲線）
+│   ├── ✅ reverse_validation.py  # 反向時間外驗證 Mar→Feb
 │   ├── ✅ multi_seed.py          # 配對 multi-seed（雜訊尺度 + 三家比較）
 │   ├── ✅ verify_rebuild.py      # 連續強制重建，驗證逐位元可重現
 │   └── ✅ rebaseline.py          # 在固定基準上重跑 M1–M4 並留紀錄
 ├── ✅ src/
 │   ├── ✅ config.py              # 路徑設定，全專案唯一來源
+│   ├── ✅ fingerprint.py         # 快取的程式邏輯指紋（AST 正規化，過時就重算）
 │   ├── ✅ data/cohort.py         # as-of 截斷（紅線 1）＋ 守門檢查
 │   ├── ✅ evaluation/metrics.py  # log loss（紅線 8）＋ 分群回報 ＋ AUC
 │   ├── ✅ evaluation/calibration.py # M4 校準量測：Brier / reliability / ECE
@@ -1517,7 +1597,9 @@ ML_kkbox/
 │   ├── ✅ serving/artifact.py    # M6 artifact 的存與載（三道守門）
 │   ├── ✅ serving/payload.py     # M6 payload → 特徵（轉換一律走 build_features）
 │   ├── ✅ serving/score.py       # M6 機率 + 原因碼（與 M5 同一條歸因路徑）
-│   └── ✅ serving/app.py         # M6 FastAPI 路由（/health /model /predict）
+│   ├── ✅ serving/examples.py    # M6 五個合成範例（依公開分群統計手造）
+│   ├── ✅ serving/app.py         # M6 FastAPI 路由（/ /health /model /predict）
+│   └── ✅ serving/static/index.html  # M6 視覺化 Demo 首頁（無框架，純 HTML/JS）
 ├── ✅ tests/
 │   ├── ✅ conftest.py            # 共用 fixture，無資料時 skip 而非 fail
 │   ├── ✅ test_data_contract.py  # SPEC §2.3 的 12 條斷言
@@ -1538,23 +1620,26 @@ ML_kkbox/
 │   ├── ✅ test_scoring_date.py   # M6 固定評分日 + 第九條守門（cutoff 超出資料涵蓋）
 │   ├── ✅ test_reverse_validation.py  # 穩健性判定邏輯（σ 門檻）
 │   ├── ✅ test_grouped_split.py  # M6 合併／群組切分的純邏輯測試（15 條）
+│   ├── ✅ test_cache_fingerprint.py   # 快取的程式邏輯指紋（過時快取必須被重算）
+│   ├── ✅ test_m4_contracts.py   # 文件與程式不得各說各話（校準用的模型、命名、假設）
+│   ├── ✅ test_examples.py       # Demo 五個合成範例的自洽性（衍生欄位、巢狀窗口）
+│   ├── ✅ test_console_encoding.py    # 繁中 Windows 的 stdout 編碼（成功的匯出不該看起來像失敗）
 │   └── ✅ test_no_leakage.py     # 八條紅線，每條都有餵違規資料會 raise 的守門測試
 ├── ✅ notebooks/
 │   └── ✅ eda_01_overview.py     # 僅 EDA，不放訓練邏輯
-├── ✅ reports/figures/           # 16 張圖表（01–07 + 03b 為 EDA，09–11 M4 校準，12–13 M4 業務指標，14 M5 原因碼，15 M6 提前評分，16 M6 漂移監控）
+├── ✅ reports/figures/           # 18 張圖（01–07 + 03b EDA，09–11 M4 校準，12–13 M4 業務指標，14 M5 原因碼，15 M6 提前評分，16 M6 漂移監控，17–18 Demo 截圖）
 ├── ✅ reports/explanations/      # M5 的 manifest.json（進 Git）＋ 營運名單與稽核表 CSV（不進 Git，每次重跑）
 └── ✅ .github/workflows/ci.yml   # ruff + pytest（見下方 CI 的限制）
 ```
 
-`src/serving/` 到 M6 才開才建 —— 空的套件目錄是雜訊，等到有東西要放進去時再開。
-`MODEL_CARD.md` 同理：它要等到限制**量出來**才寫得出來（那些數字散在 §7.10、
-§7.15、§7.17）。
+`MODEL_CARD.md` 也是同一個原則：它要等到限制**量出來**才寫得出來（那些數字散在
+[SPEC.md](SPEC.md) §7.10、§7.15、§7.17），所以到 M6 才交付。
 
 ---
 
 ## CI 驗證了什麼（以及沒驗證什麼）
 
-**CI runner 上沒有原始資料** —— 資料依競賽規則不進 Git。因此 305 條測試裡有 37 條在 CI 上會被跳過。
+**CI runner 上沒有原始資料** —— 資料依競賽規則不進 Git。因此 360 條測試裡有 72 條在 CI 上會被跳過。
 
 ⚠️ **一個全部 skip 的測試套件也會顯示綠燈。** 這跟本專案 [SPEC.md §4.5](SPEC.md) 講的「總分會騙人」是同一類問題：一個看起來成功的數字，底下什麼都沒驗證。
 
@@ -1594,6 +1679,6 @@ ML_kkbox/
 
 ## 授權與致謝
 
-- 程式碼：MIT（待加入 `LICENSE`）
+- 程式碼：**尚未指定授權** —— 未附 `LICENSE` 檔，因此依著作權法預設保留一切權利。要引用或再利用請先來信。
 - 資料：© KKBOX Group，依 [WSDM Cup 2018 競賽規則](https://www.kaggle.com/competitions/kkbox-churn-prediction-challenge/rules)使用，未隨本 repo 散布
 - 本專案為 AI 應用就業養成班機器學習實作專題，題目依手冊 PART 6.5 替換條款自選
