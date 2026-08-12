@@ -417,11 +417,33 @@ def main() -> int:
         print("    ↑ 這個差與切分規則無關，是「合併之後沒有時間外驗證集」的代價。")
 
     # ---- 6. 匯出 artifact ----
+    #
+    # ⚠️ **LTV 用最近一期的流失率，不是合併後的平均**（SPEC §9 第 4 項，2026-08-12 定案）。
+    #
+    # `expected_months = 1 / 月流失率`，所以這個選擇直接決定 LTV，再決定 `p*`，
+    # 最後決定投放名單多大 —— 而**理由與模型的排序能力完全無關**，它是一個業務假設。
+    #
+    # 原本傳 `merged.fs.y.mean()`，也就是 feb+mar 混合的 6.7682%。改用 mar_fixed
+    # 單期的 7.6703%，因為兩期的流失率是**上升的**（Feb 6.39% → Mar 8.99%）：
+    # 拿混合值當未來的預期，等於低估流失、高估 LTV、把門檻設得太低 ——
+    # 也就是**投放給太多不該投放的人**。
+    #
+    # 這不違反 `resolve_assumptions` 的紅線（不可傳評估 cohort 的流失率）：
+    # 合併模型把兩期都當訓練資料，mar 的標籤在訓練時就看得到，不是留出來的答案。
+    # 它要服務的是 Apr，而 Apr 的流失率當然不知道 —— 最近一期的已知值就是 Mar。
+    #
+    # 代價要說清楚：單月比混合雜訊大。若下一期的流失率回落，這個門檻會偏保守。
+    latest_name = cfg["cohorts"][-1]
+    latest_churn = float(parts[latest_name].y.mean())
+    print(
+        f"\n  LTV 的流失率來源：{latest_name} 的 {latest_churn:.4%}"
+        f"（合併平均是 {float(merged.fs.y.mean()):.4%}，刻意不用 —— 見程式碼註解）"
+    )
     assumptions = resolve_assumptions(
         biz_cfg["business"],
         price_per_day=merged.fs.X["price_per_day"],
-        prior_churn_rate=float(merged.fs.y.mean()),
-        months_source="+".join(cfg["cohorts"]) + "_churn_rate",
+        prior_churn_rate=latest_churn,
+        months_source=f"{latest_name}_churn_rate",
     )
     provenance = cache_fingerprints(paths, specs)
     if provenance["stale"]:
