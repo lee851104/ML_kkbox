@@ -64,6 +64,16 @@
   .note{font-size:12.5px;color:var(--ink2);background:#f7f5f1;border-left:3px solid var(--line2);
         padding:9px 13px;margin-top:12px;border-radius:0 7px 7px 0}
   .note.warn{background:#fdf7ec;border-left-color:var(--warm)}
+
+  /* 情境說明：第一段（分群統計）永遠看得到，其餘折疊。
+     整段藏起來的話，最該一眼看到的「這群人佔多少、平均流失率多少」也會被藏掉。 */
+  #scn-desc summary{cursor:pointer;list-style:none;padding-right:74px;position:relative}
+  #scn-desc summary::-webkit-details-marker{display:none}
+  #scn-desc summary::after{content:'展開 ▾';position:absolute;right:0;top:0;
+                           font-size:11.5px;color:var(--ink3);white-space:nowrap}
+  #scn-desc details[open] summary::after{content:'收合 ▴'}
+  #scn-desc summary:hover::after{color:var(--ink2)}
+  #scn-desc .fold{margin-top:9px;padding-top:9px;border-top:1px solid var(--line2)}
   footer{margin-top:30px;padding-top:20px;border-top:1px solid var(--line);font-size:13px;color:var(--ink2)}
   footer h2{margin-top:18px}
   code{background:#f0eee9;padding:1px 5px;border-radius:4px;font-size:12.5px}
@@ -83,7 +93,7 @@
 <div class="card">
   <h2>一、選一個情境</h2>
   <div class="scn" id="scn"></div>
-  <p class="note" id="scn-desc"></p>
+  <div class="note" id="scn-desc"></div>
 </div>
 
 <div class="grid">
@@ -194,8 +204,13 @@ async function boot(){
 function pick(k){
   KEY = k;
   document.querySelectorAll('#scn button').forEach(b => b.setAttribute('aria-pressed', b.dataset.k === k));
-  $('#scn-desc').innerHTML = EX[k].description.replace(/\n\n/g,'<br><br>')
-      .replace(/\*\*(.+?)\*\*/g,'<b>$1</b>').replace(/`(.+?)`/g,'<code>$1</code>');
+  // 第一段是分群統計（佔多少用戶、平均流失率），永遠顯示；其餘折疊。
+  const md = s => s.replace(/\*\*(.+?)\*\*/g,'<b>$1</b>').replace(/`(.+?)`/g,'<code>$1</code>');
+  const paras = EX[k].description.split('\n\n').map(s=>s.trim()).filter(Boolean);
+  const rest = paras.slice(1).map(md).join('<br><br>');
+  $('#scn-desc').innerHTML = rest
+    ? `<details><summary>${md(paras[0])}</summary><div class="fold">${rest}</div></details>`
+    : md(paras[0] || '');
   BASE = structuredClone(EX[k].value);
   const f = BASE.features, L = BASE.logs || {};
   setTog('#autorenew', f.last_is_auto_renew ?? 0);
