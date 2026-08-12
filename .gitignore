@@ -18,6 +18,20 @@
 *.cbm
 /artifacts/
 
+# ⚠️ **一個刻意的例外：deploy/artifacts/**
+#
+# 上面那條規則的理由是「每次重訓都變」—— 那對實驗過程中產生的每一份模型成立，
+# 把它們全存進 git 會讓歷史永久膨脹。但這裡要進版控的是**單一份已部署的版本**，
+# 2.5 MB，更新頻率以月計。規則的前提在這個用途上不成立。
+#
+# 為什麼非得進版控：Koyeb / Render / HF Spaces 的建置器是從 git repo 建映像檔的，
+# 它們看不到本機的 data_root。模型不在 repo 裡，映像檔就沒有模型。
+#
+# 升級路徑：模型變大或要頻繁換版時，改用 GitHub Release 存二進位、建置時下載，
+# 這樣既不進 git 歷史、建置器又拿得到。現在還不需要那個複雜度。
+!deploy/artifacts/
+!deploy/artifacts/**
+
 # === 手冊附錄 A 規則二：Kaggle 憑證 ===
 .kaggle/
 kaggle.json
