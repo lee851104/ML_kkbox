@@ -57,12 +57,16 @@ COPY deploy/serving.yaml ./configs/serving.yaml
 
 # 模型 artifact（2.5 MB）。由 `make deploy-artifact` 從 <data_root>/artifacts
 # 複製進 repo —— 映像檔的建置環境（Koyeb/Render/HF 的 builder）沒有 D 槽。
-COPY deploy/artifacts/catboost_lead7d/ ./artifact/
+#
+# 目錄名保留 `catboost_lead7d` 而不是簡化成 `artifact`：服務以目錄的 basename
+# 當 artifact 名稱回報在 /health，叫 `artifact` 等於在 Demo 上宣告「這個模型沒有
+# 名字」，也丟掉了名稱帶的資訊（lead7d 指的是 T−7 那個 cutoff 設計）。
+COPY deploy/artifacts/catboost_lead7d/ ./catboost_lead7d/
 
 # MODEL_ARTIFACT 優先於 data_root/artifacts/<name>（src/serving/artifact.py:207），
 # 所以容器裡既不需要 configs/paths.yaml 也不需要 data_root 的目錄結構 ——
 # 直接指到那一份 artifact 就好。這是 .gitignore 第 15 行預告過的用法。
-ENV MODEL_ARTIFACT=/app/artifact \
+ENV MODEL_ARTIFACT=/app/catboost_lead7d \
     PYTHONUNBUFFERED=1 \
     PORT=7860
 

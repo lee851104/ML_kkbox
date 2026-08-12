@@ -11,7 +11,7 @@
 
 ---
 
-> ### 🚧 專案狀態：M0–M5 完成，M6 進行中（只剩 Docker 與 HF Spaces Demo）
+> ### ✅ 專案狀態：M0–M6 完成，服務已上線
 >
 > 已完成：全部 10 個競賽檔案下載並實測、`src/` 全部資料／特徵／模型模組、
 > EDA 與 8 張圖表、M1 baseline、M2 收聽特徵聚合、M3 四個實驗、
@@ -67,7 +67,32 @@ M2 的 Feb cohort 內部 5-fold：**0.08344 ± 0.00028**。與時間外分數的
 
 **參考錨點**（官方私榜最終成績）：🥇 0.07974 ｜ 第 10 名 0.09886 ｜ 第 20 名 0.10834
 
-**Demo**：🚧 `/predict` 已可在本機起（`make serve`，見「M6 的第二塊」）；Hugging Face Spaces 尚未部署
+## 🔗 線上 Demo
+
+**https://ml-kkbox.onrender.com/docs**
+
+點 **POST /predict** → **Try it out** → 上方下拉選單挑一個情境 → **Execute**。
+不用填任何欄位，五個範例都是預填好的。
+
+| 範例 | 輸出機率 | 該不該投放挽回優惠 |
+|---|---|---|
+| ① 最後一筆交易已取消 | **0.8253** | ✅ 投放，期望淨收益 +106 元 |
+| ⑤ 沒有收聽資料 | 0.7502 | ✅ 投放，+83 元 |
+| ② 自動續訂關閉，正在流失興趣 | 0.1997 | ❌ 不投放，−88 元 |
+| ④ 首次到期的新客 | 0.0270 | ❌ 不投放，−142 元 |
+| ③ 兩年自動續訂，收聽穩定 | **0.0031** | ❌ 不投放，−149 元 |
+
+> ⏱️ **首次載入約需 50 秒。** 免費方案閒置 15 分鐘後會休眠，第一個請求要等容器冷啟動。
+> 之後的請求約 0.3 秒。
+>
+> 📋 **範例資料是合成的**，不是真實用戶 —— 依競賽規則，KKBox 資料與其衍生特徵不得散布
+> （見 [MODEL_CARD.md](MODEL_CARD.md) 的授權聲明）。數值依本 README 已公開的分群統計手造，
+> 產生方式見 [src/serving/examples.py](src/serving/examples.py)。
+>
+> ❓ **為什麼不是 Hugging Face Spaces？** 手冊第 5 條硬性規定寫「部署到 HF Spaces（免費）」，
+> 但 HF 在 2026-08 改制：Docker 與 Gradio Space 需要 PRO 訂閱，只有 Static Space 免費。
+> 本專案改用平台中立的容器部署，`Dockerfile` 同一份可直接搬回 HF。理由與各平台的
+> 部署步驟見 [deploy/README.md](deploy/README.md)。
 
 ---
 
@@ -1091,9 +1116,33 @@ PSI **大小由 epsilon 決定**，所以標記 `epsilon_floored` 並把 epsilon
 `git_dirty`）。分數 PSI 的參考期用 Feb 內部的 early stopping 切分而非訓練集的樣本內
 預測，否則「樣本內 vs 樣本外」會混進漂移裡（實測差 −0.0018，兩個都印）。
 
-### 還沒做的
+### 容器化與上線（2026-08-12 完成）
 
-Docker、HF Spaces Demo。（`MODEL_CARD.md` 已交付；Kaggle 管線見「M6 的第四塊」，
+[Dockerfile](Dockerfile) 加 [deploy/](deploy/) 的推論專用依賴，部署在
+**https://ml-kkbox.onrender.com/docs** 。設定與各平台步驟見 [deploy/README.md](deploy/README.md)。
+
+三件過程中量出來或撞到的事：
+
+**依賴清單是量出來的，不是讀原始碼推的。** 第一版用 grep 找 `src/serving/*.py` 的
+import，結論是五個套件就夠。實際跑起來炸在 `sklearn` —— `src/features/__init__.py`
+會匯入 `encoding.py`，而 grep 看不到經由套件 `__init__.py` 傳遞的相依。正解是問直譯器：
+`before = set(sys.modules); import src.serving.app; after = set(sys.modules)`。
+
+**本機量測不能證明跨平台可行。** 量到服務 RSS 217 MB、免費方案給 512 MB，於是判斷
+「lightgbm 雖然被 import 但無害，不必重構」。結果容器啟動直接掛：
+`OSError: libgomp.so.1: cannot open shared object file` —— `python:3.12-slim` 沒有
+OpenMP 執行期，而 LightGBM 的 Linux wheel 假設系統有。**記憶體從來不是重點，
+重點是那個 import 在 Linux 上根本不會成功。** 在 Windows 上量 RSS 說明不了這件事。
+
+**msno 介面在部署環境關閉。** 它讀的 cohort 快取（3.0 GB）是競賽資料的衍生特徵，
+放上公開網站會與 `MODEL_CARD.md` 的授權聲明矛盾。線上只提供 payload 介面，
+`/docs` 的五個範例全是合成資料（[src/serving/examples.py](src/serving/examples.py)）。
+
+其中一個範例刻意留著一個「不合理」：④ 新客的分群平均流失率是 39.84%，但那一位的
+輸出遠低於此 —— 因為他的自動續訂開著。**把群體基礎率當個體預測，會讓挽回名單退化成
+不需要機器學習的規則**，說明裡直接寫出這個落差而不是掩蓋它。
+
+（`MODEL_CARD.md` 已交付；Kaggle 管線見「M6 的第四塊」，
 紅線 4 的 GroupKFold 四段切分見「M6 的第五塊」。）
 
 ---
