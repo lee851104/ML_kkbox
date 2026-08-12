@@ -137,7 +137,7 @@
 <div class="card">
   <h2>四、營運視角 —— 這個月該投放給多少人</h2>
   <div class="stat" id="opstat"></div>
-  <svg id="curve" viewBox="0 0 720 220" width="100%" role="img" aria-labelledby="ct">
+  <svg id="curve" viewBox="0 0 720 250" width="100%" role="img" aria-labelledby="ct">
     <title id="ct">期望淨收益隨投放比例先升後降，最佳點約在前 3.8%</title>
   </svg>
   <p class="note" id="opnote"></p>
@@ -298,21 +298,45 @@ function drawOps(c){
     ['期望淨收益', money(a.expected_net)],
   ].map(([k,v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('');
 
-  const pts = c.curve, W = 720, H = 220, P = 34;
-  const xs = k => P + k * (W - P*2);
-  const lo = Math.min(0, ...pts.map(p=>p.net)), hi = Math.max(...pts.map(p=>p.net));
-  const ys = v => H - P - (v - lo) / (hi - lo) * (H - P*2);
-  const path = pts.map((p,i) => (i?'L':'M') + xs(p.k).toFixed(1) + ' ' + ys(p.net).toFixed(1)).join(' ');
+  // y 軸要夾住負向長尾。撒給全部人的淨收益約 −3,000 萬，而峰值只有 +330 萬 ——
+  // 直接用 min/max 當範圍的話，「0 到峰值」這段唯一有意義的區間會被壓到剩十幾個
+  // 像素，零線、峰值點與兩個標籤全部疊在一起（實際發生過）。
+  // 夾成上下大致對稱，曲線往下衝出視野反而更清楚地說明「撒太廣會虧」。
+  const pts = c.curve, W = 720, H = 250, PL = 52, PR = 18, PT = 30, PB = 40;
+  const plotW = W - PL - PR, plotH = H - PT - PB;
+  const hi = Math.max(...pts.map(p => p.net));
+  const top = hi * 1.18, bot = -hi * 0.95;
+  const xs = k => PL + k * plotW;
+  const ys = v => PT + (top - Math.min(Math.max(v, bot), top)) / (top - bot) * plotH;
+  const wan = v => (v / 10000).toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',') + ' 萬';
+
+  const path = pts.map((p, i) => (i ? 'L' : 'M') + xs(p.k).toFixed(1) + ' ' + ys(p.net).toFixed(1)).join(' ');
+  const zero = ys(0);
   const ox = xs(o.k), oy = ys(o.expected_net);
+
+  // 損益兩平：峰值之後第一個轉負的點。線性內插求交點，比直接抓那個點準。
+  let be = null;
+  for (let i = 1; i < pts.length; i++) {
+    if (pts[i-1].net >= 0 && pts[i].net < 0) {
+      const t = pts[i-1].net / (pts[i-1].net - pts[i].net);
+      be = pts[i-1].k + t * (pts[i].k - pts[i-1].k);
+      break;
+    }
+  }
+
   $('#curve').innerHTML = `
-    <line x1="${P}" y1="${ys(0)}" x2="${W-P}" y2="${ys(0)}" stroke="#d3cfc6" stroke-width="1"/>
+    <line x1="${PL}" y1="${zero}" x2="${W-PR}" y2="${zero}" stroke="#c9c5bc" stroke-width="1"/>
+    <text x="${PL-8}" y="${zero+4}" font-size="11" fill="#8a8880" text-anchor="end">0</text>
     <path d="${path}" fill="none" stroke="#1d4ed8" stroke-width="2"/>
-    <line x1="${ox}" y1="${oy}" x2="${ox}" y2="${ys(0)}" stroke="#c2410c" stroke-width="1" stroke-dasharray="3 3"/>
-    <circle cx="${ox}" cy="${oy}" r="4" fill="#c2410c"/>
-    <text x="${ox+8}" y="${oy+4}" font-size="12" fill="#c2410c">最佳 ${(o.k*100).toFixed(1)}%　${money(o.expected_net)}</text>
-    <text x="${P}" y="${H-10}" font-size="11" fill="#8a8880">投放 0%</text>
-    <text x="${W-P}" y="${H-10}" font-size="11" fill="#8a8880" text-anchor="end">投放 100%</text>
-    <text x="${P}" y="${ys(0)-6}" font-size="11" fill="#8a8880">淨收益 0</text>`;
+    ${be === null ? '' : `
+      <line x1="${xs(be)}" y1="${PT}" x2="${xs(be)}" y2="${zero}" stroke="#8a8880" stroke-width="1" stroke-dasharray="2 3"/>
+      <text x="${xs(be)+6}" y="${zero-8}" font-size="11.5" fill="#5f5e5a">超過 ${(be*100).toFixed(0)}% 開始虧錢</text>`}
+    <line x1="${ox}" y1="${oy}" x2="${ox}" y2="${zero}" stroke="#c2410c" stroke-width="1" stroke-dasharray="3 3"/>
+    <circle cx="${ox}" cy="${oy}" r="4.5" fill="#c2410c"/>
+    <text x="${ox+10}" y="${oy-10}" font-size="12.5" font-weight="600" fill="#c2410c">最佳投放 ${(o.k*100).toFixed(1)}%</text>
+    <text x="${ox+10}" y="${oy+6}" font-size="12" fill="#c2410c">淨收益 ${wan(o.expected_net)}</text>
+    <text x="${PL}" y="${H-12}" font-size="11" fill="#8a8880">投放 0%</text>
+    <text x="${W-PR}" y="${H-12}" font-size="11" fill="#8a8880" text-anchor="end">投放 100%（虧損）</text>`;
 
   const diff = Math.abs(a.expected_net - o.expected_net);
   $('#opnote').innerHTML =
