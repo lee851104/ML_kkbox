@@ -1,7 +1,7 @@
 {
   "artifact": "catboost_fixed_full",
-  "git_sha": "3441956bb5fa078a2aefb022554b71eb9bf33f1c",
-  "git_dirty": true,
+  "git_sha": "bd027ba23cf1b24418cb78a1611c5d9214feee2c",
+  "git_dirty": false,
   "cohorts": [
     "feb_fixed",
     "mar_fixed"
@@ -37,7 +37,7 @@
   },
   "final_fit": {
     "best_iteration": 1974,
-    "seconds": 453.2,
+    "seconds": 705.4,
     "sel_log_loss": 0.1505,
     "sel_constant_baseline": 0.24759
   },
