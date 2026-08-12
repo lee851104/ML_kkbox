@@ -43,15 +43,16 @@ artifact）。路由只負責 HTTP 與錯誤碼的分類：
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Annotated, Any
 
 import polars as pl
 import yaml
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from src.config import REPO_ROOT, load_paths
 from src.serving.artifact import Artifact, load_artifact
+from src.serving.examples import OPENAPI_EXAMPLES
 from src.serving.payload import LOG_FIELDS, feature_row
 from src.serving.score import Scored, score_rows
 
@@ -334,7 +335,12 @@ def model_card() -> dict[str, Any]:
 
 
 @app.post("/predict", response_model=PredictResponse, summary="流失機率 + Top-3 原因碼")
-def predict(req: PredictRequest) -> PredictResponse:
+def predict(
+    # `openapi_examples` 而不是 `examples`：前者在 Swagger UI 上是**具名下拉選單**，
+    # 後者只是塞進 schema 的無名清單。差別在訪客能不能一眼看懂有哪些情境可選。
+    # 內容與合成理由見 src/serving/examples.py。
+    req: Annotated[PredictRequest, Body(openapi_examples=OPENAPI_EXAMPLES)],
+) -> PredictResponse:
     art = _artifact()
     reasons_cfg = state.cfg.get("reasons", {})
 
