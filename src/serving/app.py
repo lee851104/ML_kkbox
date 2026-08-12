@@ -42,12 +42,15 @@ artifact）。路由只負責 HTTP 與錯誤碼的分類：
 
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated, Any
 
 import polars as pl
 import yaml
 from fastapi import Body, FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from src.config import REPO_ROOT, load_paths
@@ -390,3 +393,51 @@ def predict(
         feature_source=source,
         warnings=scored.warnings,
     )
+
+
+# ---------------------------------------------------------------------------
+# Demo 頁
+# ---------------------------------------------------------------------------
+#
+# `/docs` 是給看得懂 API 的人用的；這一頁是給其他人用的。兩個都留著，README
+# 並列兩個連結。
+#
+# 刻意不引入前端框架，也不掛 StaticFiles —— 就一個檔案、原生 JS、行內 SVG 畫圖。
+# 理由是這個服務跑在 0.1 vCPU / 512 MB 的免費方案上，而一頁靜態 HTML 的維護成本
+# 與失敗模式都遠低於一套建置流程。沒有外部 CDN，斷網也不會少半個字。
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+DEMO_CURVE_PATH = REPO_ROOT / "deploy" / "demo_curve.json"
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def home() -> HTMLResponse:
+    return HTMLResponse((STATIC_DIR / "index.html").read_text(encoding="utf-8"))
+
+
+@app.get("/demo/examples", include_in_schema=False)
+def demo_examples() -> dict[str, Any]:
+    """`/docs` 下拉選單的那五個情境，給 Demo 頁拿去畫卡片與預填欄位。
+
+    直接回 `OPENAPI_EXAMPLES`，所以兩邊永遠是同一份 —— 前端另外抄一份範例
+    是這類頁面最典型的走鐘方式。
+    """
+    return OPENAPI_EXAMPLES
+
+
+@app.get("/demo/curve", include_in_schema=False)
+def demo_curve() -> dict[str, Any]:
+    """營運視角的聚合統計，由 `scripts/demo_curve.py` 預先算好。
+
+    不即時計算：那需要整個 cohort 的特徵（3.0 GB 快取），而那份不進映像檔
+    （見 deploy/serving.yaml 的授權說明）。這裡只有曲線與幾個彙總數字。
+    """
+    if not DEMO_CURVE_PATH.exists():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"找不到 {DEMO_CURVE_PATH.name}。"
+                "請先在有資料的機器上執行 `uv run python scripts/demo_curve.py`。"
+            ),
+        )
+    return json.loads(DEMO_CURVE_PATH.read_text(encoding="utf-8"))

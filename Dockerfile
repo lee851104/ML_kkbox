@@ -55,6 +55,11 @@ COPY src/ ./src/
 # 容器專用設定（msno 介面關閉，理由見該檔）。
 COPY deploy/serving.yaml ./configs/serving.yaml
 
+# Demo 頁「營運視角」用的聚合統計（曲線 100 點 + 幾個彙總值，約 3 KB）。
+# 由 scripts/demo_curve.py 在有資料的機器上預算好 —— 即時算需要 3.0 GB 的
+# cohort 快取，而那份依授權不進映像檔。
+COPY deploy/demo_curve.json ./deploy/demo_curve.json
+
 # 模型 artifact（2.5 MB）。由 `make deploy-artifact` 從 <data_root>/artifacts
 # 複製進 repo —— 映像檔的建置環境（Koyeb/Render/HF 的 builder）沒有 D 槽。
 #
