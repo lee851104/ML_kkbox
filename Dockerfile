@@ -17,6 +17,24 @@ FROM python:3.12-slim
 # Koyeb 與 Render 不強制，但沒有理由讓推論服務有 root 權限。
 RUN useradd --create-home --uid 1000 app
 
+# OpenMP 執行期函式庫。
+#
+# python:3.12-slim 沒有它，而 LightGBM 的 Linux wheel 假設系統有 —— import 時用
+# ctypes 開原生 .so 會直接 OSError: libgomp.so.1: cannot open shared object file。
+#
+# 服務用的是 CatBoost，一行 LightGBM 都沒跑到。但 src/serving/artifact.py 匯入
+# src/models/candidates.py，而 src/models/__init__.py 會把 compare.py → train.py
+# 一路拉進來，train.py 在模組層級 `import lightgbm`。所以它照樣要能載入。
+#
+# 治本做法是把那個 import 改成延遲的（像 candidates.py 對 catboost 做的那樣），
+# 這樣連 lightgbm 都不用進映像檔。沒有先做，是因為那要動已驗證的訓練程式碼，
+# 而本機沒有 Docker 可以驗證修改後的映像檔。裝一個 200 KB 的系統套件風險低得多，
+# 而且順帶保障 catboost 與 scikit-learn 可能的 OpenMP 需求 —— 它們在 slim 上
+# 還沒跑到就先被 LightGBM 擋下了，不代表它們沒事。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # 依賴先裝、程式碼後複製 —— 這樣改一行程式碼不會讓依賴層失效重裝。
