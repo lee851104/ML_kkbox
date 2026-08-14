@@ -122,6 +122,7 @@
       <output id="gap-o"></output>
     </div>
     <p class="note">拉動任何一項會立刻重新呼叫 <code>POST /predict</code>。收聽時數與播放數會依活躍天數等比縮放，維持與其他窗口的一致性。</p>
+    <p class="note warn" id="unseen-combo" hidden>⚠️ <b>這個組合在訓練資料裡一筆都沒有。</b>沒開自動續訂的人不需要取消 —— 時間到就自然結束，所以「已取消 × 自動續訂關」在 99.2 萬人裡是空的。模型仍然會回一個看起來很合理的機率，但那是<b>外推</b>，不是它學過的東西。這正是兩個獨立開關會做到、而真實資料做不到的事。</p>
   </div>
 
   <div class="card" id="result">
@@ -234,6 +235,10 @@ function apply(){
   const f = body.features;
   f.last_is_auto_renew = getTog('#autorenew');
   f.last_is_cancel = getTog('#cancel');
+
+  // 兩個開關獨立，所以使用者切得出一個資料裡不存在的組合。與其擋住它
+  // （擋住等於假裝模型不會被這樣呼叫），不如在它發生的當下講清楚。
+  $('#unseen-combo').hidden = !(f.last_is_cancel === 1 && f.last_is_auto_renew === 0);
 
   const gap = +$('#gap').value;
   $('#gap-o').textContent = gap + ' 天';

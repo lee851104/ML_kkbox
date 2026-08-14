@@ -254,7 +254,7 @@ def build_features(df: pl.DataFrame, logs: pl.DataFrame | None = None) -> Featur
         (pl.col("n_cancel_hist") / pl.col("n_tx")).alias("cancel_rate"),
         pl.col("mean_paid"),
         # --- cutoff 之前最後一筆交易 ---
-        # last_is_cancel 是實測最強的旗標（流失率 75.07% vs 4.33%），但它
+        # last_is_cancel 是實測最強的旗標（流失率 85.70% vs 4.26%），但它
         # 幾乎等於標籤：取消常發生在到期日當天，而 cutoff 就是到期日。
         # M6 的 cutoff = 到期日 − 7 天 版本會失去這個訊號，屆時分數必然下降。
         pl.col("last_is_cancel").cast(pl.Float64),

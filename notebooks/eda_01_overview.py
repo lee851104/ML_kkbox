@@ -218,25 +218,42 @@ for col, label in [
     print(f"\n{label}")
     print(g)
 
-# 2x2 熱圖：兩個旗標交叉之後的流失率。
-# 用 nan 而不是 None 當預設值 —— matplotlib 的 imshow 不吃 object dtype，
-# 但認得 nan 並且會留白。實測 (已取消, 自動續訂關) 這格是空的：沒開自動
-# 續訂就沒東西可取消，直接讓它到期就好。
-grid = [[float("nan")] * 2 for _ in range(2)]
-counts = [[0, 0], [0, 0]]
+# 熱圖：兩個旗標交叉之後的流失率。
+#
+# ⚠️ **每個旗標有三個取值，不是兩個。** 同一天有多筆交易而該欄位彼此衝突時，
+# `_last_unambiguous()` 給 null（見 src/data/cohort.py）——「不知道」是那裡唯一
+# 誠實的值。所以 null 必須在圖上有自己的一格，不能靜靜丟掉：實測 9,179 人的
+# `last_is_cancel` 是 null，而他們的流失率 18.95% 恰好落在已取消（85.70%）與
+# 未取消（4.26%）之間，正是「這格真的混著兩種人」的樣子。
+#
+# 這一段原本寫死成 2x2，會在 r["last_is_cancel"] 是 None 時以
+# `TypeError: list indices must be integers` 掛掉 —— 也就是說 §7.11 的同日交易
+# 修正之後，這張圖就再也沒有重畫成功過。改成由 AXIS 決定維度，之後再多一個
+# 取值也不會炸。
+#
+# 空格用 nan 而不是 None —— matplotlib 的 imshow 不吃 object dtype，但認得 nan
+# 並且會留白。而空格本身就是發現：沒開自動續訂就沒東西可取消，所以
+# (已取消, 自動續訂關) 一筆都不存在。
+AXIS = [0, 1, None]
+CANCEL_LABEL = {0: "未取消", 1: "已取消", None: "同日衝突\n（不確定）"}
+RENEW_LABEL = {0: "自動續訂 關", 1: "自動續訂 開", None: "同日衝突\n（不確定）"}
+
+grid = [[float("nan")] * len(AXIS) for _ in AXIS]
+counts = [[0] * len(AXIS) for _ in AXIS]
 for r in cross.iter_rows(named=True):
-    i, j = r["last_is_cancel"], r["last_is_auto_renew"]
+    i = AXIS.index(r["last_is_cancel"])
+    j = AXIS.index(r["last_is_auto_renew"])
     grid[i][j] = r["流失率"] * 100
     counts[i][j] = r["人數"]
 
-fig, ax = plt.subplots(figsize=(6.2, 4.6))
+fig, ax = plt.subplots(figsize=(7.6, 5.4))
 im = ax.imshow(grid, cmap="Reds", vmin=0, vmax=100)
-ax.set_xticks([0, 1], ["自動續訂 關", "自動續訂 開"])
-ax.set_yticks([0, 1], ["未取消", "已取消"])
-for i in range(2):
-    for j in range(2):
+ax.set_xticks(range(len(AXIS)), [RENEW_LABEL[a] for a in AXIS])
+ax.set_yticks(range(len(AXIS)), [CANCEL_LABEL[a] for a in AXIS])
+for i in range(len(AXIS)):
+    for j in range(len(AXIS)):
         if math.isnan(grid[i][j]):
-            ax.text(j, i, "此組合\n不存在", ha="center", va="center", fontsize=10, color="#888888")
+            ax.text(j, i, "此組合\n不存在", ha="center", va="center", fontsize=9, color="#999999")
             continue
         ax.text(
             j,
@@ -244,7 +261,7 @@ for i in range(2):
             f"{grid[i][j]:.2f}%\n{counts[i][j]:,} 人",
             ha="center",
             va="center",
-            fontsize=12,
+            fontsize=11,
             color="white" if grid[i][j] > 50 else "black",
         )
 ax.set_title("流失率：最後一筆交易的兩個旗標交叉")
