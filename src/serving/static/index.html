@@ -87,9 +87,17 @@
   .btn.ghost{background:#fff;color:var(--ink2);border-color:var(--line2);font-weight:400}
 
   /* 批次名單。門檻線是這張表的重點 —— 上面橘、下面灰，線本身有標籤。 */
-  .bt{width:100%;border-collapse:collapse;font-size:13px;margin-top:14px}
+  /* 名單放進固定高度的視窗，門檻線因此**停在畫面上**、由名單滑過它。
+     50 列攤開是 2,818px，而門檻線隨假設從 377px 移動到 1,425px —— 攤開的話
+     兩者不可能同時入鏡（螢幕錄影要求零捲動），而且這一節會高達 3,317px。 */
+  .btwrap{max-height:430px;overflow-y:auto;margin-top:14px;
+          border:1px solid var(--line);border-radius:9px;background:#fff}
+  .bt{width:100%;border-collapse:collapse;font-size:13px}
   .bt th{text-align:left;font-weight:600;color:var(--ink3);font-size:11.5px;
-         padding:0 8px 6px 0;border-bottom:1px solid var(--line2);white-space:nowrap}
+         padding:7px 8px 6px 0;border-bottom:1px solid var(--line2);white-space:nowrap;
+         position:sticky;top:0;background:#fff;z-index:1}
+  .bt td:first-child,.bt th:first-child{padding-left:12px}
+  .bt td:last-child,.bt th:last-child{padding-right:12px}
   .bt td{padding:5px 8px 5px 0;border-top:1px solid #f2f0eb;vertical-align:middle}
   .bt td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
   .bt tr.on td{background:#fdf6f2}
@@ -207,7 +215,7 @@
     </p>
   </div>
 
-  <table class="bt" id="batch-table"></table>
+  <div class="btwrap"><table class="bt" id="batch-table"></table></div>
   <div id="batch-warn"></div>
   <p class="note" id="batch-note" hidden></p>
 </div>
@@ -387,7 +395,7 @@ function render(d){
 // 拖假設滑桿時**不重打 API**：機率是模型算的、不隨假設變，變的只有
 // p* = C / (r × LTV) 與逐人的期望淨收益。那兩個是算術，不是推論。
 
-let BATCH = null, SEG = {};
+let BATCH = null, SEG = {}, REASONS_READY = false;
 
 async function runBatch(){
   const btn = $('#batch-run');
@@ -396,9 +404,17 @@ async function runBatch(){
   try{
     const src = await fetch('/demo/batch').then(r => r.json());
     SEG = Object.fromEntries(src.users.map(u => [u.id, u.segment]));
-    const body = {users: src.users.map(u => ({id:u.id, features:u.features, logs:u.logs}))};
-    const r = await fetch('/predict/batch', {method:'POST',
-      headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    const users = src.users.map(u => ({id:u.id, features:u.features, logs:u.logs}));
+
+    // 兩段式。TreeSHAP 佔一次請求 97.5% 的成本，而表格要畫出來只需要機率 ——
+    // 所以先要機率（實測快 14.7 倍），把表和滑桿交給使用者，再背景補原因碼。
+    // 一次要完的話，0.1 vCPU 的免費方案上要等十幾秒才看得到任何東西。
+    const post = reasons => fetch('/predict/batch', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({users, reasons})});
+
+    REASONS_READY = false;
+    const r = await post(false);
     const d = await r.json();
     if(!r.ok){
       $('#batch-warn').innerHTML =
@@ -406,7 +422,6 @@ async function runBatch(){
       return;
     }
     BATCH = d;
-    $('#batch-hint').textContent = `${d.n} 人 · 一次請求 · 模型 ${d.model.name}`;
     $('#batch-note').hidden = false;
     $('#batch-note').innerHTML = mdText(src.note);
     $('#batch-asm').hidden = false;
@@ -427,6 +442,24 @@ async function runBatch(){
        這一頁的滑桿算術與 <code>src/serving/score.py</code> 不同步了，請以 API 回應為準。</div>`;
 
     renderBatch();
+
+    // 第二段：原因碼。機率不覆蓋 —— 兩條路徑的機率必須逐位元相同（服務端有測試
+    // 釘住），所以這裡只補 reasons，順便換上完整的整批警告。
+    $('#batch-hint').textContent = `${d.n} 人已評分 · 正在計算逐人原因碼…`;
+    post(true).then(r2 => r2.ok ? r2.json() : null).then(full => {
+      if(!full || !BATCH) return;
+      const byId = Object.fromEntries(full.users.map(u => [u.id, u]));
+      BATCH.users.forEach(u => {
+        const got = byId[u.id];
+        if(got){ u.reasons = got.reasons; u.warnings = got.warnings; }
+      });
+      BATCH.warnings = full.warnings;
+      REASONS_READY = true;
+      $('#batch-hint').textContent = `${d.n} 人 · 機率與原因碼皆即時計算 · 模型 ${d.model.name}`;
+      renderBatch();
+    }).catch(() => {
+      $('#batch-hint').textContent = `${d.n} 人已評分 · 原因碼計算失敗`;
+    });
   } catch(e){
     $('#batch-warn').innerHTML = `<div class="note warn">批次失敗：${e}</div>`;
   } finally {
@@ -477,10 +510,11 @@ function renderBatch(){
     if(!above && !placed){ html += thr; placed = true; }
     const net = netOf(u.p_churn, C, R, L);
     const why = u.reasons.length ? u.reasons[0].reason
-              : '<span class="muted">沒有推高風險的因素</span>';
+              : REASONS_READY ? '<span class="muted">沒有推高風險的因素</span>'
+              : '<span class="muted">計算中…</span>';
     html += `<tr class="${above ? 'on' : ''}">
       <td class="n muted">${i+1}</td>
-      <td><span class="who">${u.id}</span><br><span class="seg">${SEG[u.id] || ''}</span></td>
+      <td><span class="who">${u.id}</span> <span class="seg">${SEG[u.id] || ''}</span></td>
       <td class="n"><span class="pb" style="width:${Math.max(2, u.p_churn*46).toFixed(0)}px"></span>
           <b>${(u.p_churn*100).toFixed(1)}%</b></td>
       <td><span class="pill ${above ? 'p-on' : 'p-off'}">${above ? '投放' : '不投放'}</span></td>
@@ -490,6 +524,13 @@ function renderBatch(){
   });
   if(!placed) html += thr;   // 全部都在門檻之上時，線畫在最後
   $('#batch-table').innerHTML = html;
+
+  // 門檻線捲到視窗中央。不做的話拖滑桿時線會滑出視窗，而那條線就是這張表的重點。
+  const wrap = document.querySelector('.btwrap'), line = $('.thrline');
+  if(wrap && line){
+    const y = line.getBoundingClientRect().top - wrap.getBoundingClientRect().top + wrap.scrollTop;
+    wrap.scrollTop = Math.max(0, y - wrap.clientHeight / 2);
+  }
 
   $('#batch-warn').innerHTML = (BATCH.warnings || [])
     .map(w => `<div class="note warn">${w}</div>`).join('');
