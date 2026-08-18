@@ -98,6 +98,7 @@ def score_rows(
     top_k: int = TOP_K,
     min_relative: float = MIN_RELATIVE_SHARE,
     verify: bool = True,
+    with_reasons: bool = True,
     warnings: list[str] | None = None,
 ) -> list[Scored]:
     """算這幾列的機率與原因碼。
@@ -108,6 +109,11 @@ def score_rows(
         msno: 逐列的識別碼，只是帶回去，不參與計算。
         top_k / min_relative: 同 M5（每人最多幾句、呈現門檻）。
         verify: 是否逐列驗加總恆等式。見模組開頭。
+        with_reasons: 要不要算原因碼。**False 會跳過 TreeSHAP**，那佔了這個
+            函式 97.5% 的成本（50 列實測 739 ms / 758 ms，`predict` 只有 6 ms）。
+            批次名單靠它做兩段式載入：先回機率把表畫出來，再補原因碼。
+            關掉時沒有歸因，所以也沒有恆等式可驗 —— 那個保證由補原因碼的那一趟
+            提供，不是被放棄。
         warnings: 上游（payload 組裝）已經產生的警告，會併進每一列的結果。
 
     Returns:
@@ -118,17 +124,19 @@ def score_rows(
         raise ValueError("沒有要評分的列")
 
     pred = np.asarray(artifact.fitted.predict(X), dtype=np.float64)
-    attr = attribute(artifact.fitted, X)
-    if verify:
-        assert_local_accuracy(artifact.fitted, X, attr)
 
-    reasons = mark_display(
-        add_reasons(top_contributors(attr, X, k=top_k, groups=feature_group), X),
-        min_relative=min_relative,
-    )
     by_row: dict[int, list[dict[str, Any]]] = {}
-    for row in reasons.sort("row", "rank").iter_rows(named=True):
-        by_row.setdefault(int(row["row"]), []).append(row)
+    if with_reasons:
+        attr = attribute(artifact.fitted, X)
+        if verify:
+            assert_local_accuracy(artifact.fitted, X, attr)
+
+        reasons = mark_display(
+            add_reasons(top_contributors(attr, X, k=top_k, groups=feature_group), X),
+            min_relative=min_relative,
+        )
+        for row in reasons.sort("row", "rank").iter_rows(named=True):
+            by_row.setdefault(int(row["row"]), []).append(row)
 
     assumptions = artifact.meta["assumptions"]
     p_star = artifact.p_star
@@ -150,7 +158,7 @@ def score_rows(
             if not r["displayed"]
         ]
         row_warnings = list(base_warnings)
-        if not shown:
+        if with_reasons and not shown:
             # 沒有任何正貢獻的組 —— 對低風險用戶很常見（`top_contributors()`
             # 依定義不把「降低風險的因素」當成投放理由）。講出來，否則一個
             # 空的 reasons 陣列讀起來像壞了。

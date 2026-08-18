@@ -635,3 +635,93 @@ def test_batch_rejects_the_msno_interface(client):
     cohort = make_synthetic_cohort()
     users = [{"id": "u0", "features": _payload_from(cohort, 0), "msno": "u0"}]
     assert client.post("/predict/batch", json={"users": users}).status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# 批次的兩個效能修正
+# ---------------------------------------------------------------------------
+#
+# 兩者都是「快但必須完全等價」的改動，所以守的是等價而不是速度。速度會隨機器變，
+# 等價不會 —— 而一條快了十倍卻悄悄回不同機率的路徑，畫面上完全看不出來。
+
+
+@NODATA
+def test_feature_rows_matches_feature_row_cell_for_cell():
+    """一次組 N 列必須與逐列組再疊起來逐格相同。
+
+    `build_features()` 的成本大部分是固定的（建 lazy 計畫、join、算衍生欄），
+    所以呼叫一次而不是 N 次快了 4.5 倍。但那個改寫只有在輸出完全相同時才成立
+    —— 否則批次名單與單筆查詢會給出不同的機率。
+    """
+    from src.serving.payload import feature_rows
+
+    cohort = make_synthetic_cohort()
+    users = [
+        {"id": f"u{i}", "features": _payload_from(cohort, i), "logs": None}
+        for i in range(cohort.height)
+    ]
+    one_by_one = pl.concat(
+        [feature_row(u["features"], logs=None, with_logs=False, msno=u["id"])[0] for u in users],
+        how="vertical",
+    )
+    together, warnings = feature_rows(users, with_logs=False)
+
+    assert together.equals(one_by_one)
+    assert len(warnings) == len(users)
+
+
+@NODATA
+def test_feature_rows_keeps_warnings_with_their_own_row():
+    """逐列的警告不可以混在一起 —— 一個人的問題不是另一個人的問題。"""
+    from src.serving.payload import feature_rows
+
+    cohort = make_synthetic_cohort()
+    clean = _payload_from(cohort, 0)
+    late = _payload_from(cohort, 1) | {"registration_init_time": 20991231}
+    _, warnings = feature_rows(
+        [{"id": "clean", "features": clean}, {"id": "late", "features": late}],
+        with_logs=False,
+    )
+    assert warnings[0] == []
+    assert any("註冊日" in w for w in warnings[1])
+
+
+@NODATA
+def test_skipping_reasons_does_not_change_a_single_probability(client):
+    """`reasons=false` 只跳過 TreeSHAP，機率、決策與期望淨收益必須一字不差。
+
+    TreeSHAP 佔一次批次請求 97.5% 的成本，所以名單畫面先要機率、再補原因碼。
+    那個兩段式只有在兩段的機率相同時才成立 —— 不同的話，使用者拖過滑桿之後看到
+    的名單會與最終名單不一致，而畫面上不會有任何提示。
+    """
+    cohort = make_synthetic_cohort()
+    users = [{"id": f"u{i}", "features": _payload_from(cohort, i)} for i in range(4)]
+
+    fast = client.post("/predict/batch", json={"users": users, "reasons": False}).json()
+    full = client.post("/predict/batch", json={"users": users, "reasons": True}).json()
+
+    assert [u["p_churn"] for u in fast["users"]] == [u["p_churn"] for u in full["users"]]
+    assert [u["above_threshold"] for u in fast["users"]] == [
+        u["above_threshold"] for u in full["users"]
+    ]
+    assert [u["expected_net"] for u in fast["users"]] == [u["expected_net"] for u in full["users"]]
+    assert fast["n_targeted"] == full["n_targeted"]
+    assert fast["expected_net_total"] == full["expected_net_total"]
+
+
+@NODATA
+def test_skipping_reasons_stays_silent_instead_of_claiming_there_are_none(client):
+    """沒算原因碼與「這個人沒有推高風險的因素」是兩件事。
+
+    後者是一句關於使用者的判斷。在還沒算的階段講它，是在報告一個沒有量過的結論。
+    """
+    cohort = make_synthetic_cohort()
+    users = [{"id": f"u{i}", "features": _payload_from(cohort, i)} for i in range(4)]
+    fast = client.post("/predict/batch", json={"users": users, "reasons": False}).json()
+
+    for u in fast["users"]:
+        assert u["reasons"] == []
+        assert not any("沒有任何推高風險" in w for w in u["warnings"])
+
+    full = client.post("/predict/batch", json={"users": users, "reasons": True}).json()
+    assert any(u["reasons"] for u in full["users"])
