@@ -69,3 +69,10 @@ catboost_info/
 .idea/
 .DS_Store
 Thumbs.db
+
+# === 本機暫存 ===
+#
+# tmp/ 是隨手放東西的地方（轉出來的圖、抓下來的檔）。沒有這條規則的話，一個
+# git add . 就會把裡面的東西推上去，而那正是資料與版權材料最容易外洩的路徑。
+tmp/
+scratch/
