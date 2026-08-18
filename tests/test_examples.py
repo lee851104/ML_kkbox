@@ -141,3 +141,127 @@ def test_the_demo_tells_a_coherent_story():
     assert scores["cancelled"] > scores["autorenew_off"] > scores["loyal"], (
         f"風險排序不符預期：{scores}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Demo 批次
+# ---------------------------------------------------------------------------
+#
+# 五個原型是手寫的，靠上面那幾條測試守；批次是**程式生成**的 50 列，所以要守的
+# 是不同的東西：生成規則本身會不會長出一列自相矛盾的資料。手寫時看得到的矛盾，
+# 生成時看不到 —— 它只會安靜地多出一個人。
+
+
+@pytest.fixture(scope="module")
+def batch():
+    from src.serving.examples import build_demo_batch
+
+    return build_demo_batch()
+
+
+def test_batch_is_deterministic():
+    """同一個 seed 必須回同一批人。
+
+    每次重新整理就換一批的話，截圖、README 的數字與說明全部對不起來，而
+    「模型每次給的答案不一樣」是這類 Demo 最容易被誤讀的地方。
+    """
+    from src.serving.examples import build_demo_batch
+
+    assert build_demo_batch() == build_demo_batch()
+
+
+def test_batch_ids_are_unique(batch):
+    assert len({u["id"] for u in batch}) == len(batch)
+
+
+@pytest.mark.parametrize("field", ["cutoff", "n_tx", "first_tx", "last_tx"])
+def test_batch_rows_have_the_required_transaction_fields(batch, field):
+    assert all(field in u["features"] for u in batch)
+
+
+def test_batch_transaction_dates_are_ordered(batch):
+    """first_tx ≤ last_tx ≤ cutoff。紅線 1：特徵不得由 cutoff 之後的事算出來。"""
+    for u in batch:
+        f = u["features"]
+        assert f["first_tx"] <= f["last_tx"] <= f["cutoff"], u["id"]
+        assert f["registration_init_time"] <= f["first_tx"], u["id"]
+
+
+def test_batch_cutoffs_are_inside_the_training_window(batch):
+    from src.serving.examples import _CUTOFF_HI, _CUTOFF_LO
+
+    for u in batch:
+        assert _CUTOFF_LO <= u["features"]["cutoff"] <= _CUTOFF_HI, u["id"]
+
+
+def test_no_cancelled_row_has_auto_renew_off(batch):
+    """`已取消 × 自動續訂關` 在 99.2 萬人裡一筆都沒有 —— 沒開自動扣款的人不需要
+    取消，時間到就自然結束。單筆範例那邊踩過這個坑（見 OPENAPI_EXAMPLES 的註解），
+    批次是生成的，所以由這條測試釘住。
+    """
+    for u in batch:
+        f = u["features"]
+        assert not (f["last_is_cancel"] == 1 and f["last_is_auto_renew"] == 0), u["id"]
+
+
+def test_cancel_history_cannot_exceed_the_transaction_count(batch):
+    """取消次數不能超過交易筆數，而且沒取消的人手上這筆不算。
+
+    生成過一位「1 筆交易、取消佔比 100%，但最後一筆不是取消」—— 讀起來合理、
+    實際上不可能，而畫面上只是多一句原因碼。
+    """
+    for u in batch:
+        f = u["features"]
+        ceiling = f["n_tx"] if f["last_is_cancel"] else f["n_tx"] - 1
+        assert 0 <= f["n_cancel_hist"] <= ceiling, u["id"]
+
+
+def test_batch_log_windows_are_nested_and_within_bounds(batch):
+    """累計計數必須隨窗口遞增，且 active_days 不得超過窗口長度。"""
+    for u in batch:
+        L = u["logs"]
+        if L is None:
+            continue
+        prev = -1
+        for w in WINDOWS:
+            active = L[f"log{w}_active_days"]
+            assert active <= w, (u["id"], w)
+            assert active >= prev, (u["id"], w)
+            prev = active
+
+
+def test_batch_listening_is_never_after_the_cutoff(batch):
+    """紅線 2：收聽紀錄不得晚於 cutoff，所以 min_days_before 不能是負的。"""
+    for u in batch:
+        if u["logs"]:
+            assert u["logs"]["log_min_days_before"] >= 0, u["id"]
+
+
+def test_batch_derived_log_fields_match_their_formulas(batch):
+    """與五個原型同一組公式 —— 生成的列一樣不准自相矛盾。"""
+    for u in batch:
+        L = u["logs"]
+        if L is None:
+            continue
+        for w in WINDOWS:
+            plays, completed = L[f"log{w}_plays"], L[f"log{w}_completed"]
+            active, secs = L[f"log{w}_active_days"], L[f"log{w}_secs"]
+            expected = round(completed / plays, 4) if plays > 0 else None
+            assert L[f"log{w}_completion"] == expected, (u["id"], w)
+            assert L[f"log{w}_active_ratio"] == round(active / w, 4), (u["id"], w)
+            per_day = round(secs / active, 1) if active > 0 else None
+            assert L[f"log{w}_secs_per_active_day"] == per_day, (u["id"], w)
+
+
+def test_the_batch_covers_both_sides_of_the_threshold(batch):
+    """名單的重點是**那條線**，所以兩邊都要有人。
+
+    這條測試不看機率（那要載模型），看的是組成：至少要有一群 M0 實測流失率遠高
+    於 p* 的人，和一群遠低於的。全部落在同一側的話，這一頁就沒有東西可講了。
+    """
+    segments = {u["segment"] for u in batch}
+    assert any("取消" in s for s in segments)
+    assert any("自動續訂開" in s for s in segments)
+    # 「自動續訂關閉」那 14 位是這一頁的論點所在：M0 實測 32.25%，風險明顯偏高，
+    # 但仍在 p* = 48.4% 之下 —— 風險高與值得花錢是兩件事。
+    assert any(s == "自動續訂關閉" for s in segments)

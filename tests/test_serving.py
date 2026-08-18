@@ -531,3 +531,107 @@ def test_request_model_covers_exactly_the_payload_fields():
     from src.serving.app import CohortFeatures
 
     assert set(CohortFeatures.model_fields) == set(COHORT_FIELDS)
+
+
+# ---------------------------------------------------------------------------
+# /predict/batch
+# ---------------------------------------------------------------------------
+#
+# 批次守的是一件事：**它不可以是第二套實作**。分數、原因碼、門檻只要有一條路徑
+# 是批次自己寫的，線上就會有兩份答案，而兩邊都不會報錯（同 score.py 開頭的理由）。
+
+
+@NODATA
+def test_batch_scores_are_identical_to_scoring_one_by_one(client):
+    """同一份 payload，走批次與走單筆必須**逐位元相同**。
+
+    這是這一組測試的核心。批次只是把 `score_rows()` 本來就支援的多列用起來，
+    一旦有人為了效能在批次路徑上抄一份簡化的評分，這裡就會失敗。
+    """
+    cohort = make_synthetic_cohort()
+    users = [{"id": f"u{i}", "features": _payload_from(cohort, i)} for i in range(4)]
+
+    batch = client.post("/predict/batch", json={"users": users}).json()
+    assert batch["n"] == 4
+    for u, got in zip(users, batch["users"], strict=True):
+        one = client.post("/predict", json={"features": u["features"]}).json()
+        assert got["id"] == u["id"]
+        assert got["p_churn"] == one["p_churn"]
+        assert got["above_threshold"] == one["above_threshold"]
+        assert got["expected_net"] == one["expected_net"]
+        assert [r["reason"] for r in got["reasons"]] == [r["reason"] for r in one["reasons"]]
+
+
+@NODATA
+def test_batch_preserves_the_caller_order(client):
+    """回傳順序必須與送出順序相同 —— 呼叫端要靠位置對回自己的名單。"""
+    cohort = make_synthetic_cohort()
+    ids = ["z", "a", "m", "b"]
+    users = [{"id": i, "features": _payload_from(cohort, n)} for n, i in enumerate(ids)]
+    body = client.post("/predict/batch", json={"users": users}).json()
+    assert [u["id"] for u in body["users"]] == ids
+
+
+@NODATA
+def test_one_bad_row_fails_the_whole_batch_and_names_it(client):
+    """半成功是最難除錯的狀態：呼叫端拿到一份少了幾個人的名單，而少的是誰要自己比對。"""
+    cohort = make_synthetic_cohort()
+    users = [
+        {"id": "ok", "features": _payload_from(cohort, 0)},
+        {"id": "broken", "features": _payload_from(cohort, 1), "logs": {"log30_secz": 1.0}},
+    ]
+    r = client.post("/predict/batch", json={"users": users})
+    assert r.status_code == 422
+    assert "broken" in json.dumps(r.json(), ensure_ascii=False)
+
+
+@NODATA
+def test_batch_size_is_capped(client):
+    """免費方案是 0.1 vCPU，而 TreeSHAP 隨列數線性成長 —— 沒有上限的話一個大請求
+    會讓服務靜默地卡住好幾分鐘，那比回 422 更糟。
+    """
+    from src.serving.app import MAX_BATCH
+
+    cohort = make_synthetic_cohort()
+    one = _payload_from(cohort, 0)
+    over = [{"id": f"u{i}", "features": one} for i in range(MAX_BATCH + 1)]
+    assert client.post("/predict/batch", json={"users": over}).status_code == 422
+    assert client.post("/predict/batch", json={"users": []}).status_code == 422
+
+
+@NODATA
+def test_batch_totals_only_count_the_targeted(client):
+    """預算與期望淨收益只加名單上的人。
+
+    全體加總會把「不投放的人期望淨收益是負的」也算進來，而那些負數不會發生 ——
+    沒投放就沒有成本，也沒有挽回。這是一個會讓 ROI 看起來慘不忍睹的錯誤。
+    """
+    cohort = make_synthetic_cohort()
+    users = [{"id": f"u{i}", "features": _payload_from(cohort, i)} for i in range(4)]
+    body = client.post("/predict/batch", json={"users": users}).json()
+
+    on = [u for u in body["users"] if u["above_threshold"]]
+    assert body["n_targeted"] == len(on)
+    assert body["budget"] == pytest.approx(len(on) * body["assumptions"]["c_offer"], abs=0.1)
+    assert body["expected_net_total"] == pytest.approx(sum(u["expected_net"] for u in on), abs=0.1)
+
+
+@NODATA
+def test_batch_reports_the_assumptions_so_the_caller_can_move_the_threshold(client):
+    """Demo 頁靠這三個假設在前端重算 p*（拖滑桿不重打 API），所以它們必須帶出來，
+    而且要與 artifact 算出來的 p* 對得起來 —— 對不上就是那一頁在拿假數字畫圖。
+    """
+    cohort = make_synthetic_cohort()
+    body = client.post(
+        "/predict/batch", json={"users": [{"id": "u0", "features": _payload_from(cohort, 0)}]}
+    ).json()
+    a = body["assumptions"]
+    assert a["c_offer"] / (a["r_save"] * a["ltv_saved"]) == pytest.approx(body["p_star"], abs=1e-9)
+
+
+@NODATA
+def test_batch_rejects_the_msno_interface(client):
+    """批次是「一批還沒進系統的人」，msno 查的是歷史快照裡已經存在的人。"""
+    cohort = make_synthetic_cohort()
+    users = [{"id": "u0", "features": _payload_from(cohort, 0), "msno": "u0"}]
+    assert client.post("/predict/batch", json={"users": users}).status_code == 422

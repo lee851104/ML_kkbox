@@ -347,3 +347,212 @@ OPENAPI_EXAMPLES: dict[str, dict[str, Any]] = {
         "value": _NO_LISTENING,
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Demo 批次：一批到期用戶
+# ---------------------------------------------------------------------------
+#
+# ⚠️ **這裡同樣沒有任何一列真實資料**，理由與上面五個原型相同（競賽規則）。
+#
+# ## 為什麼要一批人
+#
+# 這個專案的第二項交付物是**投放名單**（M5：48,853 人 + 逐人原因碼）。單人介面
+# 看得到機率與理由，營運視角看得到曲線與總數，但「名單本身」在 Demo 上一直是
+# 看不到的 —— 而那正是交付給營運單位的東西。
+#
+# ## 組成刻意加重風險族群，但每一群的**行為**照 M0 的實測
+#
+# 真實 Mar cohort 依 p* 只有 3.83% 上榜。50 人照真實比例抽樣平均只有 2 人越過
+# 門檻，那條線就讀不出來了。所以這裡調的是**各群的人數比例**，不是各群的
+# 行為 —— 每個原型的旗標、方案、活躍度仍照 README 的 M0 分群統計：
+#
+#     已按過取消          流失率 85.70%   → 多數應該上榜
+#     自動續訂關閉        流失率 32.25%   → 多數應該落在門檻下（p* = 48.4%）
+#     自動續訂開、沒取消  流失率  0.60%   → 不應該有人上榜
+#     首次到期的新客      流失率 39.84%   → 分散在門檻兩側
+#     非月租方案          395 天 77.80%   → 高風險
+#
+# **那個「32.25% 的一群人多數不上榜」正是這一頁要講的事**：風險高與值得花錢是
+# 兩件事，而分界線在 48.4%。如果調整比例時連行為一起調，這個論點就假了。
+#
+# ## 日期依訂閱週期推，不是隨機
+#
+# cutoff 是到期日前 7 天，上一次扣款在到期日前 `plan_days` 天，所以
+# `days_since_last_tx = plan_days − 7`。這一欄是模型第三重要的特徵（15.5% gain），
+# 隨機給的話會讓它講出一個與方案週期矛盾的故事 —— 而畫面上看不出來。
+#
+# ## 變異由 seed 固定
+#
+# 每次呼叫回同一批人。否則重新整理一次就換一批，截圖與說明對不起來，而
+# 「模型每次給的答案不一樣」是這類 Demo 最容易被誤讀的地方。
+
+BATCH_SEED = 20260818
+
+# 評分時點落在 artifact 的 cohort.cutoff_window 內。
+_CUTOFF_LO, _CUTOFF_HI = 20170125, 20170221
+
+# README：`payment_plan_days` 30 天佔 97.10% 的用戶。非月租是獨立的一個原型，
+# 不混進其他群 —— 混進去的話「非月租高風險」會蓋掉原型本身要示範的訊號。
+_PLAN_NORMAL = ((30, 149.0), (30, 149.0), (30, 149.0), (30, 180.0), (30, 129.0))
+_PLAN_EXOTIC = ((395, 1788.0), (90, 447.0), (7, 49.0))
+_METHODS = (41, 40, 38, 36, 39, 34, 37)
+
+
+def _shift(yyyymmdd: int, days: int) -> int:
+    """日期加減，回 %Y%m%d。"""
+    from datetime import date, timedelta
+
+    d = date(yyyymmdd // 10000, yyyymmdd // 100 % 100, yyyymmdd % 100) + timedelta(days=days)
+    return d.year * 10000 + d.month * 100 + d.day
+
+
+def _pick_cutoff(rng) -> int:
+    """在 cutoff_window 內挑一天。"""
+    from datetime import date, timedelta
+
+    lo = date(_CUTOFF_LO // 10000, _CUTOFF_LO // 100 % 100, _CUTOFF_LO % 100)
+    hi = date(_CUTOFF_HI // 10000, _CUTOFF_HI // 100 % 100, _CUTOFF_HI % 100)
+    d = lo + timedelta(days=rng.randint(0, (hi - lo).days))
+    return d.year * 10000 + d.month * 100 + d.day
+
+
+def _synth_logs(rng, intensity: float, trend: float) -> dict[str, float | None] | None:
+    """由「活躍強度」與「近期趨勢」長出一組自洽的 38 欄收聽特徵。
+
+    Args:
+        intensity: 0~1，近 90 天的活躍比例。0 代表完全沒有紀錄（回 None）。
+        trend: 近 7 天相對於 30 天日均的倍率。< 1 是在冷卻，> 1 是在升溫。
+
+    四個窗口的 `active_days` 必須**隨窗口遞增**（它們是累計計數，不是各自獨立的
+    數字）。手寫最容易錯的就是這件事，所以這裡由程式夾住；比率與趨勢一律交給
+    `_log_block()` 用 `src/features/logs.py` 的同一組公式算。
+    """
+    if intensity <= 0:
+        return None
+
+    a90 = min(90, max(1, round(90 * intensity * rng.uniform(0.92, 1.08))))
+    a30 = min(30, max(0, round(30 * intensity * rng.uniform(0.88, 1.12))))
+    a7 = min(7, max(0, round(7 * intensity * trend * rng.uniform(0.85, 1.15))))
+    a14 = min(14, max(a7, round(14 * intensity * (1.0 + trend) / 2)))
+    a30 = max(a30, a14)  # 累計計數必須單調
+    a90 = max(a90, a30)
+
+    per_day_secs = rng.uniform(2600, 4600)
+    plays_per_day = rng.uniform(14, 26)
+    completion = rng.uniform(0.52, 0.86)
+    unq_ratio = rng.uniform(0.58, 0.9)
+
+    def block(active: int) -> dict[str, float]:
+        secs = round(active * per_day_secs, 1)
+        plays = round(active * plays_per_day)
+        return {
+            "active_days": active,
+            "secs": secs,
+            "plays": plays,
+            "completed": round(plays * completion),
+            "unq": round(plays * unq_ratio),
+        }
+
+    # 紅線 2：收聽紀錄不得晚於 cutoff，所以 min_days_before >= 0。
+    if a7 > 0:
+        min_before = rng.randint(0, 2)
+    elif a30 > 0:
+        min_before = rng.randint(8, 26)
+    else:
+        min_before = rng.randint(32, 84)
+
+    return _log_block(
+        {7: block(a7), 14: block(a14), 30: block(a30), 90: block(a90)},
+        min_days_before=min_before,
+        max_days_before=rng.randint(84, 89),
+    )
+
+
+# (人數, 標籤, cancel, auto_renew, 活躍強度, 近期趨勢, 年資月數, 方案組)
+#
+# ⚠️ `cancel=1` 一律配 `auto_renew=1` —— 沒開自動續訂的人不需要取消，那個組合在
+# 99.2 萬人裡一筆都沒有。這裡是程式生成，所以那個約束由這張表**結構性地**保證，
+# 不靠人工檢查（單筆範例那邊是靠註解提醒，踩過一次坑）。
+_ARCHETYPES: tuple[tuple[int, str, int, int, tuple, tuple, tuple, str], ...] = (
+    (8, "已按過取消", 1, 1, (0.0, 0.30), (0.0, 0.4), (6, 30), "normal"),
+    (14, "自動續訂關閉", 0, 0, (0.10, 0.65), (0.3, 0.9), (4, 28), "normal"),
+    (18, "自動續訂開、沒取消", 0, 1, (0.45, 1.0), (0.8, 1.25), (10, 30), "normal"),
+    # README ④：新客整群平均 39.84%，但個體差很多。拆成兩組正是那一節的論點 ——
+    # 「同樣是新客，誰該發、誰不用發」，照組別發優惠就不需要機器學習了。
+    (3, "新客 · 自動續訂開", 0, 1, (0.0, 0.5), (0.0, 1.1), (1, 1), "normal"),
+    (2, "新客 · 自動續訂關", 0, 0, (0.0, 0.4), (0.0, 0.9), (1, 1), "normal"),
+    # README：無收聽紀錄者「多半是自動續訂的休眠訂戶 —— 不聽歌但錢照扣，所以
+    # 不流失」。放在這裡是為了示範「沒有資料 ≠ 高風險」。
+    (3, "休眠：完全沒有收聽紀錄", 0, 1, (0.0, 0.0), (1.0, 1.0), (8, 26), "normal"),
+    (2, "非月租方案", 0, 0, (0.0, 0.45), (0.2, 0.8), (3, 14), "exotic"),
+)
+
+
+def build_demo_batch() -> list[dict[str, Any]]:
+    """一批到期用戶（合成），給 Demo 頁丟進 `POST /predict/batch`。
+
+    Returns:
+        每人一個 `{"id", "segment", "features", "logs"}`。**不含機率** —— 分數
+        一律由服務即時算，這一頁上沒有任何預先算好的數字（SPEC §7.14）。
+    """
+    import random
+
+    rng = random.Random(BATCH_SEED)
+    out: list[dict[str, Any]] = []
+    seq = 0
+
+    for count, label, cancel, auto_renew, act, trend, tenure, plan_grp in _ARCHETYPES:
+        pool = _PLAN_EXOTIC if plan_grp == "exotic" else _PLAN_NORMAL
+        for _ in range(count):
+            seq += 1
+            cutoff = _pick_cutoff(rng)
+            months = rng.randint(*tenure)
+            plan_days, list_price = pool[rng.randrange(len(pool))]
+            is_new = months <= 1
+
+            # cutoff = 到期日 − 7，上一次扣款在到期日 − plan_days
+            #   → 正常續訂的 days_since_last_tx = plan_days − 7
+            # 取消的人最後一筆是那筆取消，發生在扣款之後、到期日之前，所以更近。
+            cycle_gap = max(1, plan_days - 7)
+            gap = rng.randint(1, max(2, cycle_gap - 1)) if cancel else max(
+                1, cycle_gap + rng.randint(-2, 2)
+            )
+            last_tx = _shift(cutoff, -gap)
+            first_tx = last_tx if is_new else _shift(last_tx, -(months * plan_days))
+            n_tx = 1 if is_new else max(2, months + rng.randint(-1, 2))
+
+            logs = _synth_logs(rng, rng.uniform(*act), rng.uniform(*trend))
+            has_bd = rng.random() > 0.45
+
+            features: dict[str, Any] = {
+                "cutoff": cutoff,
+                "n_tx": n_tx,
+                "first_tx": first_tx,
+                "last_tx": last_tx,
+                # 取消次數不能超過交易筆數，而且沒取消的人手上這筆不算 ——
+                # 否則會長出「1 筆交易、取消佔比 100%，但最後一筆不是取消」
+                # 這種讀起來合理、實際上不可能的列（實際生成過一位）。
+                "n_cancel_hist": (
+                    min(rng.randint(1, 3), n_tx)
+                    if cancel
+                    else min(rng.choice([0, 0, 0, 1]), n_tx - 1)
+                ),
+                "mean_paid": round(list_price * rng.uniform(0.92, 1.0), 1),
+                "last_is_cancel": cancel,
+                "last_is_auto_renew": auto_renew,
+                # 取消不是一次收費，實付為 0。
+                "last_actual_amount_paid": 0.0 if cancel else list_price,
+                "last_plan_list_price": list_price,
+                "last_payment_plan_days": plan_days,
+                "last_payment_method_id": _METHODS[rng.randrange(len(_METHODS))],
+                "city": rng.choice([1, 1, 5, 13, 15, 22, 4, 12]),
+                # bd 為 0 是原始資料的無效值，不是年齡 —— 服務不替呼叫端猜。
+                "bd": rng.randint(18, 46) if has_bd else 0,
+                "gender": rng.choice(["male", "female"]) if rng.random() > 0.65 else None,
+                "registered_via": rng.choice([9, 7, 3, 4]),
+                "registration_init_time": _shift(first_tx, -rng.randint(0, 40)),
+            }
+            out.append({"id": f"u_{seq:04d}", "segment": label, "features": features, "logs": logs})
+
+    return out

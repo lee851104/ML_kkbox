@@ -79,6 +79,35 @@
   code{background:#f0eee9;padding:1px 5px;border-radius:4px;font-size:12.5px}
   .muted{color:var(--ink3)}
   .spin{opacity:.45;transition:opacity .12s}
+
+  .btn{border:1px solid var(--ink);background:var(--ink);color:#fff;border-radius:8px;
+       padding:7px 16px;cursor:pointer;font:inherit;font-size:13.5px;font-weight:600}
+  .btn:hover{background:#000}
+  .btn[disabled]{opacity:.5;cursor:default}
+  .btn.ghost{background:#fff;color:var(--ink2);border-color:var(--line2);font-weight:400}
+
+  /* 批次名單。門檻線是這張表的重點 —— 上面橘、下面灰，線本身有標籤。 */
+  .bt{width:100%;border-collapse:collapse;font-size:13px;margin-top:14px}
+  .bt th{text-align:left;font-weight:600;color:var(--ink3);font-size:11.5px;
+         padding:0 8px 6px 0;border-bottom:1px solid var(--line2);white-space:nowrap}
+  .bt td{padding:5px 8px 5px 0;border-top:1px solid #f2f0eb;vertical-align:middle}
+  .bt td.n{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .bt tr.on td{background:#fdf6f2}
+  .bt .who{font-variant-numeric:tabular-nums;color:var(--ink2)}
+  .bt .seg{color:var(--ink3);font-size:11.5px}
+  .bt .why{color:var(--ink2)}
+  .pill{display:inline-block;border-radius:5px;padding:1px 8px;font-size:11.5px;font-weight:600;white-space:nowrap}
+  .p-on{background:var(--hot-bg);color:var(--hot)}
+  .p-off{background:#f0eee9;color:var(--ink3)}
+  .bt tr.thr td{border-top:0;padding:0}
+  .thrline{display:flex;align-items:center;gap:10px;margin:7px 0;color:var(--hot);
+           font-size:11.5px;font-weight:600;white-space:nowrap}
+  .thrline::before,.thrline::after{content:'';flex:1;height:0;border-top:1px dashed var(--hot)}
+  .bt .pb{display:inline-block;height:6px;border-radius:3px;background:var(--hot);
+          vertical-align:middle;margin-right:7px}
+  .bt tr:not(.on) .pb{background:#c9c5bc}
+  .asm{display:flex;flex-wrap:wrap;gap:20px;align-items:center;margin-top:4px}
+  .asm .ctl{margin:6px 0;flex:1 1 260px}
 </style>
 </head>
 <body>
@@ -145,8 +174,46 @@
   </div>
 </div>
 
+<div class="card" id="batch-card">
+  <h2>四、一批到期用戶進來，誰該拿優惠</h2>
+  <p class="sub" style="font-size:14px;margin:-4px 0 12px">
+    上面是一個人，這裡是一批人 —— 這才是交給營運單位的東西：<b>一份排好序的名單</b>，
+    每個人帶一句理由，中間一條線分開「值得花這筆錢」與「不值得」。</p>
+
+  <button class="btn" id="batch-run" type="button">用範例批次（50 人）評分</button>
+  <span class="muted" style="font-size:12.5px;margin-left:10px" id="batch-hint">一次 POST /predict/batch，50 人同時評分</span>
+
+  <div class="stat" id="batch-stat" style="margin-top:16px"></div>
+
+  <div id="batch-asm" hidden>
+    <p class="note" style="margin-bottom:2px"><b>拉動下面兩個商業假設，看那條線怎麼動。</b>
+      機率不會重算（模型沒有變），變的是<b>值不值得花這筆錢</b> ——
+      <code>p* = 成本 ÷ (挽回成功率 × LTV)</code>。</p>
+    <div class="asm">
+      <div class="ctl">
+        <label>優惠成本 C_offer</label>
+        <input type="range" id="c-offer" min="50" max="400" step="10">
+        <output id="c-offer-o"></output>
+      </div>
+      <div class="ctl">
+        <label>挽回成功率 r_save</label>
+        <input type="range" id="r-save" min="4" max="40" step="1">
+        <output id="r-save-o"></output>
+      </div>
+    </div>
+    <p class="muted" style="font-size:12px;margin:0">
+      LTV <b id="ltv-v">—</b> 不在這裡調 —— 它是<b>由資料推</b>的（平均月費 × 續訂月數），
+      只有「續訂月數」那一項是假設。兩個滑桿調的才是純假設。
+    </p>
+  </div>
+
+  <table class="bt" id="batch-table"></table>
+  <div id="batch-warn"></div>
+  <p class="note" id="batch-note" hidden></p>
+</div>
+
 <div class="card">
-  <h2>四、營運視角 —— 這個月該投放給多少人</h2>
+  <h2>五、營運視角 —— 這個月該投放給多少人</h2>
   <div class="stat" id="opstat"></div>
   <svg id="curve" viewBox="0 0 720 250" width="100%" role="img" aria-labelledby="ct">
     <title id="ct">期望淨收益隨投放比例先升後降，最佳點約在前 3.8%</title>
@@ -158,7 +225,7 @@
   <h2>這個模型不能做什麼</h2>
   <p>它預測的是<b>「會不會流失」，不是「投放優惠能不能改變他的行為」</b>。後者需要 uplift modeling 與 A/B 實驗，本資料集沒有實驗組／對照組結構，無法回答。把預測機率當成因果效應是這類專案最常見的越界。</p>
   <p>資料是 2015–2017 年 KKBOX（<b>音樂</b>串流）的歷史快照。結論外推到影音串流或電信服務時需重新驗證。</p>
-  <p class="muted">上方五個情境是<b>合成資料</b>，不是真實用戶 —— 依競賽規則，KKBox 資料與其衍生特徵不得散布。數值依公開的分群統計手造。</p>
+  <p class="muted">上方五個情境與那批 50 人都是<b>合成資料</b>，不是真實用戶 —— 依競賽規則，KKBox 資料與其衍生特徵不得散布。數值依公開的分群統計手造。</p>
   <p><a href="/docs">技術文件與 API（Swagger）</a> ｜ <a href="https://github.com/lee851104/ML_kkbox">GitHub 原始碼</a> ｜ <a href="/health">服務狀態</a></p>
 </footer>
 
@@ -197,6 +264,8 @@ async function boot(){
     apply();
   }));
   ['active30','gap'].forEach(id => $('#'+id).addEventListener('input', apply));
+  $('#batch-run').addEventListener('click', runBatch);
+  ['c-offer','r-save'].forEach(id => $('#'+id).addEventListener('input', renderBatch));
 
   if(cv) drawOps(cv);
   pick(Object.keys(EX)[0]);
@@ -306,6 +375,124 @@ function render(d){
     : '<tr><td class="muted">沒有超過呈現門檻的因素</td></tr>';
 
   $('#warns').innerHTML = (d.warnings||[]).map(w => `<div class="note warn">${w}</div>`).join('');
+}
+
+// ---------------------------------------------------------------------------
+// 四、批次名單
+// ---------------------------------------------------------------------------
+//
+// 兩段式：GET /demo/batch 拿一批（未評分的）payload，再 POST /predict/batch 拿分數。
+// 回一份算好的名單會少一趟往返，但那樣示範的就不是模型，是一個 JSON 檔。
+//
+// 拖假設滑桿時**不重打 API**：機率是模型算的、不隨假設變，變的只有
+// p* = C / (r × LTV) 與逐人的期望淨收益。那兩個是算術，不是推論。
+
+let BATCH = null, SEG = {};
+
+async function runBatch(){
+  const btn = $('#batch-run');
+  btn.disabled = true; btn.textContent = '評分中…';
+  $('#batch-card').classList.add('spin');
+  try{
+    const src = await fetch('/demo/batch').then(r => r.json());
+    SEG = Object.fromEntries(src.users.map(u => [u.id, u.segment]));
+    const body = {users: src.users.map(u => ({id:u.id, features:u.features, logs:u.logs}))};
+    const r = await fetch('/predict/batch', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    const d = await r.json();
+    if(!r.ok){
+      $('#batch-warn').innerHTML =
+        `<div class="note warn">批次被拒：${JSON.stringify(d.detail).slice(0,300)}</div>`;
+      return;
+    }
+    BATCH = d;
+    $('#batch-hint').textContent = `${d.n} 人 · 一次請求 · 模型 ${d.model.name}`;
+    $('#batch-note').hidden = false;
+    $('#batch-note').innerHTML = mdText(src.note);
+    $('#batch-asm').hidden = false;
+    $('#ltv-v').textContent = money(d.assumptions.ltv_saved);
+    $('#c-offer').value = d.assumptions.c_offer;
+    $('#r-save').value = Math.round(d.assumptions.r_save * 100);
+
+    // 守門：用伺服器自己的假設把 p* 與期望淨收益重算一遍。這一頁為了讓滑桿即時
+    // 反應而在前端重算了 score.py 的那條算術 —— 兩邊對不上就是這裡算錯了，而那
+    // 是一個不會有任何錯誤訊息的錯誤（畫面照樣好好的，只是數字是假的）。
+    const a = d.assumptions, drift = [];
+    if(Math.abs(a.c_offer / (a.r_save * a.ltv_saved) - d.p_star) > 1e-6) drift.push('p*');
+    const u0 = d.users[0];
+    if(u0 && Math.abs(netOf(u0.p_churn, a.c_offer, a.r_save, a.ltv_saved) - u0.expected_net) > 0.2)
+      drift.push('期望淨收益');
+    if(drift.length) $('#batch-warn').innerHTML =
+      `<div class="note warn">⚠️ 前端重算的 ${drift.join('、')} 與服務回傳的對不上 ——
+       這一頁的滑桿算術與 <code>src/serving/score.py</code> 不同步了，請以 API 回應為準。</div>`;
+
+    renderBatch();
+  } catch(e){
+    $('#batch-warn').innerHTML = `<div class="note warn">批次失敗：${e}</div>`;
+  } finally {
+    btn.disabled = false; btn.textContent = '重新評分';
+    $('#batch-card').classList.remove('spin');
+  }
+}
+
+const netOf = (p, c, r, ltv) => p * r * ltv - c;
+const mdText = s => s.replace(/\*\*(.+?)\*\*/g,'<b>$1</b>').replace(/`(.+?)`/g,'<code>$1</code>');
+
+function renderBatch(){
+  if(!BATCH) return;
+  const C = +$('#c-offer').value, R = +$('#r-save').value / 100;
+  const L = BATCH.assumptions.ltv_saved;
+  const pStar = C / (R * L);
+  $('#c-offer-o').textContent = C + ' 元';
+  $('#r-save-o').textContent = (R*100).toFixed(0) + '%';
+
+  const rows = [...BATCH.users].sort((a,b) => b.p_churn - a.p_churn);
+  const on = rows.filter(u => u.p_churn > pStar);
+  const netTotal = on.reduce((s,u) => s + netOf(u.p_churn, C, R, L), 0);
+
+  $('#batch-stat').innerHTML = [
+    ['這批人', nf(BATCH.n) + ' 人'],
+    ['值得投放', nf(on.length) + ' 人'],
+    ['佔比', (on.length / BATCH.n * 100).toFixed(0) + '%'],
+    ['投放門檻 p*', (pStar*100).toFixed(1) + '%'],
+    ['要花的錢', money(on.length * C)],
+    ['期望淨收益', money(netTotal)],
+  ].map(([k,v]) => `<div><span>${k}</span><b>${v}</b></div>`).join('');
+
+  // p* > 100% 是有意義的，不是溢位：優惠的成本已經超過「挽回一個必定流失的人」
+  // 的期望價值，所以**沒有任何人值得投放**。畫面上直接講出來，否則一個 129% 的
+  // 機率門檻讀起來像壞掉了。
+  const thr = pStar > 1
+    ? `<tr class="thr"><td colspan="6"><div class="thrline">門檻 p* = ${(pStar*100).toFixed(1)}%
+        ·　超過 100%，這組假設下<b style="margin:0 3px">沒有任何人值得投放</b>——
+        優惠成本已經高過挽回一個必定流失的人所能拿回的價值</div></td></tr>`
+    : `<tr class="thr"><td colspan="6"><div class="thrline">門檻 p* = ${(pStar*100).toFixed(1)}%
+        ·　上面 ${on.length} 人值得花這筆錢，下面 ${BATCH.n - on.length} 人不值得</div></td></tr>`;
+
+  let html = `<tr><th>#</th><th>用戶</th><th class="n">流失機率</th><th>決策</th>
+              <th>主要原因</th><th class="n">期望淨收益</th></tr>`;
+  let placed = false;
+  rows.forEach((u, i) => {
+    const above = u.p_churn > pStar;
+    if(!above && !placed){ html += thr; placed = true; }
+    const net = netOf(u.p_churn, C, R, L);
+    const why = u.reasons.length ? u.reasons[0].reason
+              : '<span class="muted">沒有推高風險的因素</span>';
+    html += `<tr class="${above ? 'on' : ''}">
+      <td class="n muted">${i+1}</td>
+      <td><span class="who">${u.id}</span><br><span class="seg">${SEG[u.id] || ''}</span></td>
+      <td class="n"><span class="pb" style="width:${Math.max(2, u.p_churn*46).toFixed(0)}px"></span>
+          <b>${(u.p_churn*100).toFixed(1)}%</b></td>
+      <td><span class="pill ${above ? 'p-on' : 'p-off'}">${above ? '投放' : '不投放'}</span></td>
+      <td class="why">${why}</td>
+      <td class="n" style="color:${net >= 0 ? 'var(--hot)' : 'var(--ink3)'}">${money(net)}</td>
+    </tr>`;
+  });
+  if(!placed) html += thr;   // 全部都在門檻之上時，線畫在最後
+  $('#batch-table').innerHTML = html;
+
+  $('#batch-warn').innerHTML = (BATCH.warnings || [])
+    .map(w => `<div class="note warn">${w}</div>`).join('');
 }
 
 function drawOps(c){

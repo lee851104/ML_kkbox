@@ -6,6 +6,7 @@
     GET  /health    服務活著嗎、載的是哪一份 artifact、有沒有警告
     GET  /model     完整的 artifact metadata（含 61 個欄名與業務假設）
     POST /predict   一位用戶的機率 + Top-3 原因碼
+    POST /predict/batch  一批用戶 —— 誰該拿挽回優惠（同一條評分路徑）
 
 ## 兩種介面，因為它們回答不同的問題
 
@@ -55,11 +56,15 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from src.config import REPO_ROOT, load_paths
 from src.serving.artifact import Artifact, load_artifact
-from src.serving.examples import OPENAPI_EXAMPLES
+from src.serving.examples import OPENAPI_EXAMPLES, build_demo_batch
 from src.serving.payload import LOG_FIELDS, feature_row
 from src.serving.score import Scored, score_rows
 
 CONFIG_PATH = REPO_ROOT / "configs" / "serving.yaml"
+
+# 批次上限。免費方案是 0.1 vCPU / 512 MB，而 TreeSHAP 的成本隨列數線性成長 ——
+# 沒有上限的話一個 50,000 列的請求會讓服務靜默地卡住好幾分鐘，那比回 422 更糟。
+MAX_BATCH = 500
 
 
 def load_serving_config(path=None) -> dict[str, Any]:
@@ -169,6 +174,69 @@ class PredictResponse(BaseModel):
     model: dict[str, Any] = Field(description="這個機率是誰算的：模型、cutoff 定義、可否上線")
     feature_source: dict[str, Any]
     warnings: list[str]
+
+
+class BatchUser(BaseModel):
+    """批次裡的一位用戶。與 `PredictRequest` 的差別只有兩個。
+
+    一是**沒有 msno 介面**：批次的用意是「一批還沒進過系統的人」，而 msno 查的
+    是歷史快照裡已經存在的人，兩者是不同的問題。二是多一個 `id`，純粹帶回去讓
+    呼叫端對得上自己的名單 —— 它不參與計算，也不會進特徵。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(description="呼叫端自己的識別碼，原樣帶回")
+    features: CohortFeatures
+    logs: dict[str, float | None] | None = None
+
+    @model_validator(mode="after")
+    def _known_log_fields(self) -> BatchUser:
+        unknown = sorted(set(self.logs or {}) - set(LOG_FIELDS))
+        if unknown:
+            raise ValueError(f"{self.id} 的 logs 有不認識的欄位：{unknown}")
+        return self
+
+
+class BatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    users: list[BatchUser] = Field(
+        min_length=1,
+        max_length=MAX_BATCH,
+        description=f"一批到期用戶，最多 {MAX_BATCH} 人",
+    )
+
+
+class BatchItem(BaseModel):
+    """批次結果的一列。刻意比 `PredictResponse` 薄。
+
+    `model` / `feature_source` 這些逐筆重複的欄位提到批次層級去了 —— 500 個人
+    各帶一份一模一樣的 metadata，是把回應撐大十倍去講同一句話。
+    """
+
+    id: str
+    p_churn: float
+    above_threshold: bool
+    expected_net: float
+    reasons: list[Reason]
+    warnings: list[str]
+
+
+class BatchResponse(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    n: int
+    n_targeted: int = Field(description="p > p* 的人數，也就是名單長度")
+    p_star: float
+    # 前端要能在不重打分數的前提下移動門檻（拖假設滑桿），所以把三個假設帶出來。
+    # p* = c_offer / (r_save × ltv_saved)，換算在呼叫端做，模型不必重跑。
+    assumptions: dict[str, float]
+    budget: float = Field(description="名單人數 × C_offer，也就是要花的錢")
+    expected_net_total: float = Field(description="名單上每個人期望淨收益的總和")
+    model: dict[str, Any]
+    warnings: list[str] = Field(description="整批共通的警告（逐人的在各自的列裡）")
+    users: list[BatchItem]
 
 
 # ---------------------------------------------------------------------------
@@ -395,6 +463,109 @@ def predict(
     )
 
 
+@app.post(
+    "/predict/batch",
+    response_model=BatchResponse,
+    summary="一批到期用戶 → 誰該拿挽回優惠",
+)
+def predict_batch(req: BatchRequest) -> BatchResponse:
+    """把一批人一次評完，回傳每個人的機率、決策與原因碼。
+
+    ## 為什麼要有這一支
+
+    `/predict` 回答的是「這個人」，而營運要的是「這一批人裡誰該拿優惠」。逐一
+    打 `/predict` 也能得到同一份名單，但那是 N 次 HTTP、N 次模型載入檢查、N 次
+    TreeSHAP 初始化 —— 而 CatBoost 一次評 500 列與評 1 列的差別只有毫秒。
+
+    ## 分數與單筆完全同源
+
+    特徵組裝走 `feature_row()`、評分與原因碼走 `score_rows()`，與 `/predict`
+    是**同一條路徑**（理由見 score.py 開頭）。批次不是另一套實作，只是把
+    `score_rows()` 本來就支援的多列用起來 —— 那個函式從第一版就是收 N 列的。
+
+    ## 錯誤碼
+
+    任何一位的 payload 不合就整批 422，並指出是誰。批次成功一半是最難除錯的
+    狀態：呼叫端拿到一份少了幾個人的名單，而少的是誰要自己比對。
+    """
+    art = _artifact()
+    reasons_cfg = state.cfg.get("reasons", {})
+
+    frames: list[pl.DataFrame] = []
+    ids: list[str] = []
+    payload_warnings: list[list[str]] = []
+    for u in req.users:
+        try:
+            X, w = feature_row(
+                u.features.model_dump(),
+                logs=u.logs,
+                with_logs=art.uses_log_features,
+                msno=u.id,
+                feature_names=art.feature_names,
+            )
+        except (ValueError, KeyError, AssertionError) as e:
+            # 指出是哪一位 —— 「批次裡有一筆不合」而不說是誰，等於沒講。
+            raise HTTPException(status_code=422, detail=f"{u.id}：{e}") from e
+        frames.append(X)
+        ids.append(u.id)
+        payload_warnings.append(w)
+
+    try:
+        scored = score_rows(
+            art,
+            pl.concat(frames, how="vertical"),
+            msno=ids,
+            top_k=int(reasons_cfg.get("top_k", 3)),
+            min_relative=float(reasons_cfg.get("min_relative", 0.05)),
+            # 逐人的 payload 警告不能當成整批共通的（那會讓沒問題的人也掛上
+            # 別人的警告），所以這裡不傳，下面逐列併回去。
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    users = [
+        BatchItem(
+            id=s.msno,
+            p_churn=s.p_churn,
+            above_threshold=s.above_threshold,
+            expected_net=s.expected_net,
+            reasons=[Reason(**r) for r in s.reasons],
+            warnings=[*w, *s.warnings],
+        )
+        for w, s in zip(payload_warnings, scored, strict=True)
+    ]
+
+    a = art.meta["assumptions"]
+    c_offer = float(a["c_offer"])
+    targeted = [u for u in users if u.above_threshold]
+
+    batch_warnings = list(art.warnings)
+    n_no_logs = sum(1 for u in req.users if not u.logs)
+    if art.uses_log_features and n_no_logs:
+        batch_warnings.append(
+            f"{n_no_logs} 位沒有提供收聽紀錄。省略不是中性預設 —— 那等於主張這些人"
+            "近 90 天沒聽過歌（訓練資料裡 18.0% 的用戶確實如此）。"
+        )
+
+    return BatchResponse(
+        n=len(users),
+        n_targeted=len(targeted),
+        p_star=art.p_star,
+        assumptions={
+            "c_offer": c_offer,
+            "r_save": float(a["r_save"]),
+            "ltv_saved": float(a["ltv_saved"]),
+        },
+        budget=round(len(targeted) * c_offer, 1),
+        # 只加名單上的人。全體加總會把「不投放的人期望淨收益是負的」也算進來，
+        # 而那些負數不會發生 —— 沒投放就沒有成本，也沒有挽回。
+        expected_net_total=round(sum(u.expected_net for u in targeted), 1),
+        model=_model_info(art),
+        warnings=batch_warnings,
+        users=users,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Demo 頁
 # ---------------------------------------------------------------------------
@@ -423,6 +594,25 @@ def demo_examples() -> dict[str, Any]:
     是這類頁面最典型的走鐘方式。
     """
     return OPENAPI_EXAMPLES
+
+
+@app.get("/demo/batch", include_in_schema=False)
+def demo_batch() -> dict[str, Any]:
+    """Demo 頁的那一批到期用戶（合成），**未評分**。
+
+    只回 payload，機率由頁面自己 POST 到 `/predict/batch` 取得 —— 這一頁上沒有
+    任何預先算好的數字（SPEC §7.14）。回一份算好的名單會快一點，但那樣示範的
+    就不是模型，是一個 JSON 檔。
+    """
+    users = build_demo_batch()
+    return {
+        "users": users,
+        "note": (
+            "這 50 位是合成資料，而且是**刻意加重風險族群**的抽樣，"
+            "不是母體分佈 —— 真實 Mar cohort 依 p* 只有 3.83% 上榜。"
+            "照真實比例抽 50 人平均只會有 2 人越過門檻，那條線就看不出來了。"
+        ),
+    }
 
 
 @app.get("/demo/curve", include_in_schema=False)
