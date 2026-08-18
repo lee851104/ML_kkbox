@@ -262,7 +262,7 @@ def main() -> int:
         "submission": {
             "csv": f"reports/kaggle/{csv_path.name}",
             "sha256": digest,
-            "csv_in_git": False,  # *.csv 在 .gitignore（手冊附錄 A 規則一）
+            "csv_in_git": False,  # *.csv 在 .gitignore（競賽規則）
         },
         "how_to_read": [
             "本地**算不出**這份預測的分數：Apr cohort 的標籤是 Kaggle 測試集，"

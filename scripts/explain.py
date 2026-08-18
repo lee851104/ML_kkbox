@@ -21,7 +21,7 @@ M4 交付的是「該投放給多少人」，這支交付的是**那些人是誰
 
   - CSV 每次重跑，不進 git（`*.gitignore` 的 `*.csv` 已經讓它進不去）
   - 進 git 的只有 `manifest.json`，而它**只放 provenance 與彙總** ——
-    逐人的列是資料，資料不上 GitHub（手冊附錄 A 規則一）
+    逐人的列是資料，資料不上 GitHub（競賽規則）
   - 下游不得快取這份 CSV。M6 的 `/predict` 要即時算，不是查表
 
 ## 名單的定義是 `p > p*`，不是「前 5%」
@@ -550,7 +550,7 @@ def main() -> int:
             "min_probability": round(float(p_sel.min()), 6),
             "csv": f"reports/explanations/{csv_path.name}",
             "csv_sha256_16": digest,
-            "csv_in_git": False,  # *.csv 在 .gitignore（手冊附錄 A 規則一）
+            "csv_in_git": False,  # *.csv 在 .gitignore（競賽規則）
         },
         # --- 呈現門檻：營運看到的與稽核看到的不是同一組句子 ---
         #

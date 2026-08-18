@@ -73,7 +73,7 @@ cv:
   n_splits: 5
   seed: 42
 
-# 實驗追蹤（SPEC §8 · 手冊六項硬性規定第 4 條）。
+# 實驗追蹤（SPEC §8）。
 #
 # ⚠️ 後端用 SQLite 而不是傳統的 ./mlruns 目錄。MLflow 3.x 起檔案系統後端
 # 進入維護模式，直接呼叫會拋 MlflowException 要求改用資料庫後端。

@@ -180,7 +180,7 @@ eval:
 # ⚠️ 輸出的 CSV **不是資產**，是這一次執行的結果（*.csv 在 .gitignore 裡，
 #    進不了 git）。改 configs/business.yaml 的 C_offer，名單大小就會變 ——
 #    那是正常的，它是函式的輸出。進 git 的只有 manifest.json，而它只放
-#    provenance 與彙總，不放逐人的列（手冊附錄 A 規則一）。
+#    provenance 與彙總，不放逐人的列（競賽規則：資料不進 Git）。
 #
 # 單一用戶查詢：uv run python scripts/explain.py --msno <msno> ...
 explain:

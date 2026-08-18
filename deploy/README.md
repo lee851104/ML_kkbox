@@ -6,7 +6,7 @@
 
 ## 為什麼不是 Hugging Face Spaces
 
-手冊六項硬性規定第 5 條寫「部署到 Hugging Face Spaces（**免費**）」。**該敘述在 2026-08
+本專案原訂部署到 Hugging Face Spaces（**免費**）。**該敘述在 2026-08
 已不成立**：HF 改為 Static Space 免費，Docker 與 Gradio Space 需要 PRO 訂閱
 （$9/月），免費帳號只剩 2 個 ZeroGPU 的 Gradio Space 額度。
 

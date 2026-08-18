@@ -1,4 +1,4 @@
-# === 手冊附錄 A 規則一：資料絕對不可上傳到 GitHub ===
+# === 競賽規則：資料絕對不可上傳到 GitHub ===
 # 開頭的斜線很重要：沒有它的話 `data/` 會匹配任何層級的 data 目錄，
 # 連 src/data/（程式碼）都會被忽略。加了斜線就只匹配 repo 根目錄那一個。
 /data/
@@ -32,7 +32,7 @@
 !deploy/artifacts/
 !deploy/artifacts/**
 
-# === 手冊附錄 A 規則二：Kaggle 憑證 ===
+# === Kaggle 憑證 ===
 .kaggle/
 kaggle.json
 

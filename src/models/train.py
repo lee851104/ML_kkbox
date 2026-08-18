@@ -330,7 +330,7 @@ def log_to_mlflow(
     cfg: dict[str, Any],
     paths: Paths,
 ) -> str | None:
-    """把這次實驗記進 MLflow（SPEC §8 · 手冊硬性規定第 4 條）。
+    """把這次實驗記進 MLflow（SPEC §8）。
 
     在報表印出**之後**才呼叫：追蹤失敗不該讓辛苦訓練出來的數字消失在
     stack trace 裡。
